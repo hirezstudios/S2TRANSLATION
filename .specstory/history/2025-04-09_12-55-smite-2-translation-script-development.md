@@ -5672,7 +5672,444 @@ What's the next feature or refinement you'd like to add?
 
 ---
 
+_**User**_
 
+I'm worried about creating stage2 and stage3 markdown/system prompt files for each language. I tihnk we'll screw maintenance of that up. Can we genericize those so we can use just one file for all languages and insert in the specific language stuff? 
+
+---
+
+_**Assistant**_
+
+
+
+---
+
+That's an excellent point. Maintaining language-specific versions of the Stage 2 and Stage 3 prompts would quickly become unwieldy and error-prone. Genericizing them is the way to go.
+
+Here's the plan:
+
+1.  **Create Template Files:** Rename the existing stage prompts to act as templates:
+    *   `system_prompts/stage2_evaluate_esLA.md` -> `system_prompts/stage2_evaluate_template.md`
+    *   `system_prompts/stage3_refine_esLA.md` -> `system_prompts/stage3_refine_template.md`
+2.  **Modify Template Content:** Edit these template files to:
+    *   Replace hardcoded language names (like "Latin American Spanish") with a placeholder, e.g., `<<TARGET_LANGUAGE_NAME>>`.
+    *   Ensure instructions clearly state to evaluate/refine based on the *provided* `LANGUAGE_RULESET` (which will be injected).
+3.  **Update Script Logic (`translate_esla.py`):**
+    *   Define the Stage 2/3 prompt file variables to point to the *template* files.
+    *   Add a simple mapping in the script to get the full language name from `LANGUAGE_CODE` (e.g., `esLA` -> "Latin American Spanish").
+    *   Modify `load_system_prompts` to load these templates.
+    *   Modify `translate_row_worker`: Before making the Stage 2/3 API calls, dynamically create the *final* system prompt string by:
+        *   Loading the appropriate template (`stage2_system_prompt` or `stage3_system_prompt`).
+        *   Replacing `<<TARGET_LANGUAGE_NAME>>` with the name derived from `LANGUAGE_CODE`.
+        *   Replacing `<<RULES>>` with the actual rules loaded from the language-specific Stage 1 prompt file (`stage1_system_prompt`).
+        *   Replacing other context placeholders (`<<SOURCE_TEXT>>`, etc.) as already implemented.
+    *   Pass this fully constructed, language-specific system prompt to `call_active_api`.
+
+**Step 1 & 2: Rename Files and Modify Templates**
+
+First, I'll rename the files using git mv for tracking history.
+
+
+---
+
+```bash
+git mv system_prompts/stage2_evaluate_esLA.md system_prompts/stage2_evaluate_template.md && git mv system_prompts/stage3_refine_esLA.md system_prompts/stage3_refine_template.md
+```
+
+```
+.venvstewchisam@Stews-MacBook-Pro s2translation % 
+
+```
+
+---
+
+Now, I'll edit the content of these renamed files to use the `<<TARGET_LANGUAGE_NAME>>` placeholder.
+
+Editing `system_prompts/stage2_evaluate_template.md`:
+
+
+---
+
+```diff
+- You are an Expert Linguistic Quality Assurance Specialist for the video game SMITE 2, specializing in evaluating English to Latin American Spanish translations. Your goal is to assess the quality of a proposed translation based on accuracy, fluency, terminology, tone, and adherence to specific project rules.
++ You are an Expert Linguistic Quality Assurance Specialist for the video game SMITE 2, specializing in evaluating English to <<TARGET_LANGUAGE_NAME>> translations. Your goal is to assess the quality of a proposed translation based on accuracy, fluency, terminology, tone, and adherence to specific project rules.
+  
+- **Task:** Evaluate the provided `INITIAL_TRANSLATION` of the `SOURCE_TEXT` according to the `LANGUAGE_RULESET` and your expert knowledge of SMITE, MOBAs, and neutral Latin American Spanish localization for gaming.
++ **Task:** Evaluate the provided `INITIAL_TRANSLATION` of the `SOURCE_TEXT` according to the `LANGUAGE_RULESET` and your expert knowledge of SMITE, MOBAs, and <<TARGET_LANGUAGE_NAME>> localization for gaming.
+  
+  **Inputs:**
+  1.  `SOURCE_TEXT`: The original English text.
+- 2.  `INITIAL_TRANSLATION`: The proposed Latin American Spanish translation.
++ 2.  `INITIAL_TRANSLATION`: The proposed <<TARGET_LANGUAGE_NAME>> translation.
+  3.  `LANGUAGE_RULESET`: The specific ruleset governing this translation project.
+  
+  **Evaluation Criteria:**
+  *   **Accuracy:** Does the translation accurately convey the meaning of the source text?
+- *   **Fluency:** Does the translation sound natural and grammatically correct in Latin American Spanish?
++ *   **Fluency:** Does the translation sound natural and grammatically correct in <<TARGET_LANGUAGE_NAME>>?
+  *   **Terminology:** Does the translation use the correct, established terms for SMITE 2 and MOBA concepts as defined in the ruleset? Are untranslatable terms handled correctly?
+- *   **Tone:** Does the translation match the appropriate tone for SMITE 2 (e.g., instructions, UI text, lore)? Does it follow formality guidelines (e.g., "tú" form)?
++ *   **Tone:** Does the translation match the appropriate tone for SMITE 2 (e.g., instructions, UI text, lore)? Does it follow formality guidelines defined in the ruleset?
+  *   **Rule Adherence:** Does the translation follow all grammatical, formatting (tags, placeholders), capitalization, and style rules defined in the `LANGUAGE_RULESET`?
+  
+  *   **`feedback`:** Brief, actionable points identifying specific errors or areas for improvement. Reference rule numbers if applicable. If the score is 10, the feedback should simply be "Excellent translation." or similar. Focus ONLY on what needs changing or confirming excellence.
+  
+- **Example Feedback:**
++ **Example Feedback (Illustrative - adapt to target language context):**
+  *   "Incorrect term used for 'Cooldown' (Rule T1). 'Nivel' should not be capitalized (Rule CAP1). Formal 'usted' used instead of 'tú' (Rule F1)."
+  *   "Phrase 'potenciar tu progreso' sounds slightly more natural than 'supercargar tu progreso' here. Otherwise adheres to rules."
+```
+
+---
+
+Editing `system_prompts/stage3_refine_template.md`:
+
+
+---
+
+```diff
+- You are an Expert Translator for the video game SMITE 2, specializing in English to Latin American Spanish localization. You previously provided a translation which has received feedback. Your task is to revise the translation based *only* on the provided feedback, while still adhering to the original translation ruleset.
++ You are an Expert Translator for the video game SMITE 2, specializing in English to <<TARGET_LANGUAGE_NAME>> localization. You previously provided a translation which has received feedback. Your task is to revise the translation based *only* on the provided feedback, while still adhering to the original translation ruleset.
+  
+- **Task:** Generate a revised Latin American Spanish translation incorporating the specific `FEEDBACK` provided.
++ **Task:** Generate a revised <<TARGET_LANGUAGE_NAME>> translation incorporating the specific `FEEDBACK` provided.
+  
+  **Inputs:**
+  *   Modify the `INITIAL_TRANSLATION` *only* to address the points raised in the `FEEDBACK`.
+  *   Ensure the revised translation still fully complies with the `LANGUAGE_RULESET`.
+- *   Maintain the correct tone and formality (usually informal "tú").
++ *   Maintain the correct tone and formality defined in the `LANGUAGE_RULESET`.
+  *   Preserve all formatting tags (like `<x>`) and placeholders (like `{Count}|plural(...)`) exactly as they appear in the `SOURCE_TEXT`.
+  
+  **Output:**
+- Provide ONLY the final, revised Latin American Spanish translation. Do not include explanations, apologies, greetings, or the original text.
++ Provide ONLY the final, revised <<TARGET_LANGUAGE_NAME>> translation. Do not include explanations, apologies, greetings, or the original text.
+  
+  **PLACEHOLDERS (These will be replaced by the system):**
+```
+
+---
+
+**Step 3: Update Script Logic (`translate_esla.py`)**
+
+Now, I'll modify the script to use these templates and perform the necessary replacements.
+
+
+---
+
+```diff
+  # Load environment variables from .env file
+  load_dotenv()
++ 
++ # --- Language Configuration --- 
++ # TODO: Make this configurable, e.g., via command-line argument or .env
++ LANGUAGE_CODE = "esLA" 
++ # Simple mapping for language names (expand as needed)
++ LANGUAGE_NAME_MAP = {
++     "esLA": "Latin American Spanish",
++     "frFR": "French (France)",
++     # Add other languages here
++ }
++ TARGET_LANGUAGE_NAME = LANGUAGE_NAME_MAP.get(LANGUAGE_CODE, LANGUAGE_CODE) # Fallback to code if name not found
++ # --- End Language Configuration ---
+  
+  # --- API Configuration --- 
+  INPUT_CSV = "input/blake-small.csv"
+  # Dynamically generate output filename based on API and language
+- LANGUAGE_CODE = "esLA" # TODO: Make this dynamic if supporting multiple languages
+  OUTPUT_CSV = f"output/blake-small_{LANGUAGE_CODE}_{ACTIVE_API.lower()}.csv"
+  SYSTEM_PROMPT_FILE = f"system_prompts/tg_{LANGUAGE_CODE}.md"
+  STAGE2_MODEL_OVERRIDE = os.getenv("STAGE2_MODEL")
+  STAGE3_MODEL_OVERRIDE = os.getenv("STAGE3_MODEL")
+- # Define system prompt file paths
+- STAGE1_PROMPT_FILE = f"system_prompts/tg_{LANGUAGE_CODE}.md"
+- STAGE2_PROMPT_FILE = f"system_prompts/stage2_evaluate_{LANGUAGE_CODE}.md"
+- STAGE3_PROMPT_FILE = f"system_prompts/stage3_refine_{LANGUAGE_CODE}.md"
++ # Define system prompt template file paths
++ STAGE1_PROMPT_FILE = f"system_prompts/tg_{LANGUAGE_CODE}.md" # Specific language rules for stage 1
++ STAGE2_TEMPLATE_FILE = f"system_prompts/stage2_evaluate_template.md" # Use template
++ STAGE3_TEMPLATE_FILE = f"system_prompts/stage3_refine_template.md" # Use template
+  # --- End Workflow Configuration ---
+  
+  error_counter = 0
+  stage1_system_prompt = None # Load prompts globally once
+- stage2_system_prompt = None
+- stage3_system_prompt = None
++ stage2_template_prompt = None # Store the template content
++ stage3_template_prompt = None # Store the template content
+  
+  def load_system_prompts():
+-     """Loads all necessary system prompts."""
+-     global stage1_system_prompt, stage2_system_prompt, stage3_system_prompt
++     """Loads the base language ruleset and stage prompt templates."""
++     global stage1_system_prompt, stage2_template_prompt, stage3_template_prompt
+      
+-     print(f"Loading Stage 1 prompt from {STAGE1_PROMPT_FILE}...")
+-     stage1_system_prompt = load_single_prompt(STAGE1_PROMPT_FILE)
+-     # Append the crucial final instruction directly to the loaded prompt
+-     final_instruction = "\n\n**IMPORTANT FINAL INSTRUCTION: Your final output should contain ONLY the translated text (or evaluation, depending on the stage) for the given input string. Do not include any other information, explanations, thinking processes (like <think> blocks), or formatting.**"
+-     stage1_system_prompt += final_instruction
++     print(f"Loading Base Rules (Stage 1) from {STAGE1_PROMPT_FILE}...")
++     stage1_system_prompt_raw = load_single_prompt(STAGE1_PROMPT_FILE)
++     # The final instruction for the API call itself
++     final_instruction = "\n\n**IMPORTANT FINAL INSTRUCTION: Your final output should contain ONLY the translated text (or evaluation/revision, depending on the stage) for the given input string. Do not include any other information, explanations, thinking processes (like <think> blocks), or formatting.**"
++     # Store the raw rules + final instruction for stage 1 calls
++     stage1_system_prompt = stage1_system_prompt_raw + final_instruction
+  
+      if TRANSLATION_MODE == "THREE_STAGE":
+-         print(f"Loading Stage 2 prompt from {STAGE2_PROMPT_FILE}...")
+-         stage2_system_prompt = load_single_prompt(STAGE2_PROMPT_FILE)
+-         stage2_system_prompt += final_instruction # Also add instruction here
++         print(f"Loading Stage 2 Template from {STAGE2_TEMPLATE_FILE}...")
++         stage2_template_prompt = load_single_prompt(STAGE2_TEMPLATE_FILE)
++         # We add the final instruction dynamically later when constructing the full prompt
+          
+-         print(f"Loading Stage 3 prompt from {STAGE3_PROMPT_FILE}...")
+-         stage3_system_prompt = load_single_prompt(STAGE3_PROMPT_FILE)
+-         stage3_system_prompt += final_instruction # And here
+-         
++         print(f"Loading Stage 3 Template from {STAGE3_TEMPLATE_FILE}...")
++         stage3_template_prompt = load_single_prompt(STAGE3_TEMPLATE_FILE)
++         # Add final instruction dynamically later
+  
+  def load_single_prompt(filepath):
+          "source": source_text,
+          "mode": TRANSLATION_MODE,
++         "language": LANGUAGE_CODE,
+      }
+  
+  
+      try:
++         # Define the final instruction to append to constructed prompts
++         final_instruction = "\n\n**IMPORTANT FINAL INSTRUCTION: Your final output should contain ONLY the final text (evaluation/revision). No extra text, formatting, or explanations.**"
++ 
+          if TRANSLATION_MODE == "ONE_STAGE":
+-             # Use DEFAULT_API and its default model (no override needed here)
+              api_to_use = DEFAULT_API
+              model_to_use = None 
+              audit_record = {**audit_record_base, "api": api_to_use, "model": model_to_use or "default"} 
+              
++             # Use the globally loaded stage1_system_prompt (already has final instruction)
+              final_translation = call_active_api(api_to_use, stage1_system_prompt, source_text, 
+                                                  row_identifier=row_index + 2, model_override=model_to_use)
+  
+          elif TRANSLATION_MODE == "THREE_STAGE":
+-             # --- Stage 1: Initial Translation --- 
++             # Get the base language rules (Stage 1 prompt without its final instruction)
++             base_rules = stage1_system_prompt.replace(final_instruction, "").strip()
++             
++             # --- Stage 1 --- 
+              s1_api = STAGE1_API
+              s1_model = STAGE1_MODEL_OVERRIDE 
+              audit_record = {**audit_record_base, "stage1_api": s1_api, "stage1_model": s1_model or "default"}
++             # Use the globally loaded stage1_system_prompt (already has final instruction)
+              initial_translation = call_active_api(s1_api, stage1_system_prompt, source_text, 
+                                                  row_identifier=f"{row_index + 2}-S1", model_override=s1_model)
+                  log_audit_record(audit_record)
+              else:
+-                 # --- Stage 2: Evaluation --- 
++                 # --- Stage 2 --- 
+                  s2_api = STAGE2_API
+                  s2_model = STAGE2_MODEL_OVERRIDE
+                  audit_record["stage2_api"] = s2_api
+                  audit_record["stage2_model"] = s2_model or "default"
+                  
+-                 # Construct Stage 2 Prompt 
+-                 # Ensure stage2_system_prompt is loaded
+-                 if not stage2_system_prompt:
+-                     raise ValueError("Stage 2 system prompt not loaded.")
+-                 # Inject the base rules (stage1 prompt without final instruction)
+-                 base_rules = stage1_system_prompt.split("**IMPORTANT FINAL INSTRUCTION:")[0].strip()
+-                 eval_system_prompt = stage2_system_prompt.replace("<<RULES>>", base_rules) 
+-                 # Create user content for evaluation stage
+-                 eval_user_content = f"SOURCE_TEXT:\n{source_text}\n\nINITIAL_TRANSLATION:\n{initial_translation}"
++                 # Construct Stage 2 Prompt Dynamically
++                 if not stage2_template_prompt:
++                     raise ValueError("Stage 2 template prompt not loaded.")
++                 eval_system_prompt = stage2_template_prompt.replace("<<TARGET_LANGUAGE_NAME>>", TARGET_LANGUAGE_NAME)\
++                                                         .replace("<<RULES>>", base_rules)\
++                                                         .replace("<<SOURCE_TEXT>>", source_text)\
++                                                         .replace("<<INITIAL_TRANSLATION>>", initial_translation)
++                 eval_system_prompt += final_instruction # Add final instruction
++                 # User content for stage 2 is often minimal as context is in the system prompt
++                 eval_user_content = "Evaluate the provided translation based on the rules and context."
+                                  
+                  evaluation_raw = call_active_api(s2_api, eval_system_prompt, eval_user_content, 
+                  evaluation_feedback = None
+                  if evaluation_raw:
+-                     # --- Start JSON Cleaning --- 
+                      cleaned_json_str = evaluation_raw.strip()
+                      # Remove potential markdown fences
+                          cleaned_json_str = cleaned_json_str[:-3] # Remove ```
+                      cleaned_json_str = cleaned_json_str.strip() # Strip again after removing fences
+-                     # --- End JSON Cleaning --- 
+-                     
+                      try:
+-                         # Use the cleaned string for parsing
+                          eval_data = json.loads(cleaned_json_str) 
+                          evaluation_score = eval_data.get("score")
+                  audit_record["evaluation_feedback"] = evaluation_feedback
+  
+-                 if evaluation_feedback is None: # Check if the API call itself failed
++                 if evaluation_feedback is None: # Stage 2 API call failed
+                      final_translation = initial_translation
+                      with print_lock: translated_counter += 1 
+                      audit_record["error"] = "Stage 2 API call failed, using Stage 1 result"
+                      audit_record["final_translation"] = final_translation 
+                      log_audit_record(audit_record)
+-                 # Decide if refinement is needed (e.g., score < 10 or specific feedback exists) 
+-                 # Let's proceed to stage 3 regardless for now, unless stage 2 failed entirely.
+                  else:
+-                     # --- Stage 3: Refinement --- 
++                     # --- Stage 3 --- 
+                      s3_api = STAGE3_API
+                      s3_model = STAGE3_MODEL_OVERRIDE
+                      audit_record["stage3_api"] = s3_api
+                      audit_record["stage3_model"] = s3_model or "default"
+                      
+-                     # Construct Stage 3 Prompt
+-                     if not stage3_system_prompt:
+-                         raise ValueError("Stage 3 system prompt not loaded.")
+-                     # Inject base rules again
+-                     refine_system_prompt_template = stage3_system_prompt.replace("<<RULES>>", base_rules)
+-                     # Inject dynamic content
+-                     refine_system_prompt = refine_system_prompt_template.replace("<<SOURCE_TEXT>>", source_text)\
++                     # Construct Stage 3 Prompt Dynamically
++                     if not stage3_template_prompt:
++                         raise ValueError("Stage 3 template prompt not loaded.")
++                     refine_system_prompt = stage3_template_prompt.replace("<<TARGET_LANGUAGE_NAME>>", TARGET_LANGUAGE_NAME)\
++                                                                 .replace("<<RULES>>", base_rules)\
++                                                                 .replace("<<SOURCE_TEXT>>", source_text)\
+                                                                  .replace("<<INITIAL_TRANSLATION>>", initial_translation)\
+                                                                  .replace("<<FEEDBACK>>", evaluation_feedback or "No specific feedback provided.")
++                     refine_system_prompt += final_instruction # Add final instruction
+                                                                     
+-                     # User content for stage 3 can be simple, as context is in system prompt
+                      refine_user_content = "Revise the translation based on the provided context and feedback."
+                      
+```
+
+---
+
+**Step 4: Commit Changes**
+
+
+---
+
+```bash
+git add . && git commit -m "refactor: Genericize Stage 2/3 prompts using templates"
+```
+
+```
+<actor: Genericize Stage 2/3 prompts using templates"
+[master c1eddaf] refactor: Genericize Stage 2/3 prompts using templates
+ 7 files changed, 5771 insertions(+), 237 deletions(-)
+ create mode 100644 .specstory/history/2025-04-09_12-55-smite-2-translation-script-development.md
+ delete mode 100644 .specstory/history/2025-04-09_12-55-untitled.md
+ rename system_prompts/{stage2_evaluate_esLA.md => stage2_evaluate_template.md} (80%)
+ rename system_prompts/{stage3_refine_esLA.md => stage3_refine_template.md} (64%)
+ rename system_prompts/{archive/french_translation_ruleset.md => tg_frFR.md} (94%)
+.venvstewchisam@Stews-MacBook-Pro s2translation %
+```
+
+---
+
+We have now successfully genericized the Stage 2 and Stage 3 prompts!
+
+*   The specific prompts (`stage2_evaluate_esLA.md`, `stage3_refine_esLA.md`) have been renamed to templates (`stage2_evaluate_template.md`, `stage3_refine_template.md`) and updated to use the `<<TARGET_LANGUAGE_NAME>>` placeholder.
+*   The script (`translate_esla.py`) now:
+    *   Uses these template file paths.
+    *   Looks up the target language name based on `LANGUAGE_CODE`.
+    *   Constructs the full Stage 2/3 system prompts dynamically within the worker thread by replacing placeholders for language name, rules, source text, etc., before calling the API.
+
+This makes adding support for new languages much simpler:
+1.  Add the language code and name to `LANGUAGE_NAME_MAP`.
+2.  Create the Stage 1 ruleset file (e.g., `system_prompts/tg_frFR.md`).
+3.  Update `LANGUAGE_CODE` in the script (or make it a parameter).
+4.  Optionally adjust `.env` settings for `STAGE<N>_API` if different APIs are desired for that language.
+
+The core Stage 2/3 logic remains the same.
+
+Shall we run a quick test again in `THREE_STAGE` mode to ensure the dynamic prompt construction works correctly?
+
+---
+
+_**User**_
+
+Yes, let's run again to make sure it still works as expected. This time, I made I changed to OPENAI-GEMINI-OPENAI instead of GEMINI-OPENAI-GEMINI to see how that does as well. 
+
+---
+
+_**Assistant**_
+
+
+
+---
+
+Okay, understood. We'll test the generic template logic and the new API sequence (OpenAI -> Gemini -> OpenAI) for the `THREE_STAGE` mode.
+
+Running the script with the updated `.env` settings:
+
+
+---
+
+```bash
+python3 translate_esla.py
+```
+
+```
+.venvstewchisam@Stews-MacBook-Pro s2translation % python3 translate_esla.py
+Selected Mode: THREE_STAGE
+Default API (for ONE_STAGE/Filename): GEMINI
+Stage APIs: S1=OPENAI, S2=GEMINI, S3=OPENAI
+OpenAI client initialized.
+Gemini API may be used; configuration will happen per-thread.
+Loading Base Rules (Stage 1) from system_prompts/tg_esLA.md...
+Loading Stage 2 Template from system_prompts/stage2_evaluate_template.md...
+Loading Stage 3 Template from system_prompts/stage3_refine_template.md...
+Cleared previous audit log: output/translation_audit_log.jsonl
+Using Mode: THREE_STAGE
+Translating 7 rows (Default API: GEMINI, up to 8 threads)... Output: output/blake-small_esLA_gemini.csv
+Translating (GEMINI - THREE_STAGE): 100%|█████████████████████████████████████| 7/7 [00:27<00:00,  3.90s/it]
+
+Writing results to main output file...
+
+Translation process completed.
+Total rows processed: 7
+Rows resulting in successful final translation: 7
+Rows encountering errors: 0
+Main output saved to: output/blake-small_esLA_gemini.csv
+Detailed audit log saved to: output/translation_audit_log.jsonl
+.venvstewchisam@Stews-MacBook-Pro s2translation %
+```
+
+---
+
+Great! The script ran successfully using the generic templates and the new stage API sequence (OpenAI -> Gemini -> OpenAI).
+
+*   It correctly identified the mode and stage APIs.
+*   It loaded the base rules and the stage templates.
+*   It processed all 7 rows without errors reported during the run.
+*   The main output was saved to `output/blake-small_esLA_gemini.csv`. (Note: the filename is still based on the `DEFAULT_API`, which was Gemini in `.env`, even though Stage 1 used OpenAI. We might want to adjust filename logic later if needed).
+*   The audit log was saved to `output/translation_audit_log.jsonl`.
+
+Let's quickly check the audit log to see the new flow.
+
+
+---
+
+Read file: output/translation_audit_log.jsonl
+
+---
+
+The audit log confirms the new sequence worked:
+*   Stage 1 used OpenAI.
+*   Stage 2 used Gemini (and the JSON output was parsed correctly this time).
+*   Stage 3 used OpenAI to refine based on Gemini's feedback.
+
+It's interesting to see Gemini giving feedback (like correcting capitalization or verb choice) which OpenAI then incorporates in the final pass. Several translations received a score of 10 from Gemini, resulting in the Stage 3 translation being the same as Stage 1.
+
+This generic template approach seems successful and provides a flexible framework for experimenting with different models at each stage.
 
 ---
 

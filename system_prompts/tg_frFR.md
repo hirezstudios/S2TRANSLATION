@@ -11,6 +11,8 @@ Translation Rules:
 - Follow Unreal Engine standards: plural/gender forms and Hangul post-positions
 - Output only the translated text — no quotes, markdown, or extra formatting
 - Verify output to match tag/placeholder structure from source
+- Be mindful of length!! Your translation must fit within the game UI, so try to keep the length of your translation as close to the English translation while still conveying the required meaning and context. 
+
 
 ## LANGUAGE SPECIFIC RULESET (FRENCH) 
 

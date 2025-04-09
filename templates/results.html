@@ -142,14 +142,30 @@
                         const taskId = cell.getRow().getData().task_id;
                         const newStatus = cell.getValue();
                         let approvedText = null;
-                        // If setting back to an approved state, use current approved text
-                        if (newStatus.startsWith('approved')) {
-                             approvedText = cell.getRow().getData().approved_translation;
-                             // If original text doesn't exist (e.g. previously denied), maybe use LLM final?
+                        const rowData = cell.getRow().getData();
+
+                        // Determine the correct approved text based on the NEW status
+                        if (newStatus === 'approved_original') {
+                             // Use the LLM's final output as the approved text
+                             approvedText = rowData.final_translation;
+                        } else if (newStatus === 'approved_edited') {
+                             // Use the *current* text in the approved column 
+                             // (which might be the original LLM text or a previous edit)
+                             approvedText = rowData.approved_translation;
+                             // If it was previously denied, approved_translation might be null, 
+                             // maybe fallback to final_translation in this specific case?
                              if (approvedText === null) {
-                                 approvedText = cell.getRow().getData().final_translation;
+                                approvedText = rowData.final_translation; 
+                                logger.warning(`Task ${taskId}: Status changed to approved_edited, but approved_translation was null. Using final_translation as base.`);
                              }
+                        } else if (newStatus === 'denied') {
+                             approvedText = null; // Explicitly null for denied
+                        } else { // pending_review or other?
+                             // Keep current approved text? Or clear it? Let's keep it for now.
+                             approvedText = rowData.approved_translation;
                         }
+                        
+                        // Call the save function
                         handleReview(taskId, newStatus, approvedText);
                     }
                 },

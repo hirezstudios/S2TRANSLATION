@@ -187,59 +187,66 @@ st.header("2. Run Translation")
 
 def run_translation_thread(file_path, selected_langs, mode_config):
     """Target function for the background processing thread.
-       Updates session state and triggers reruns at key points."""
-    batch_id_local = None # Local var for batch ID
+       Updates session state but does NOT trigger reruns."""
+    batch_id_local = None
     try:
-        logger.info(f"Background thread started for {file_path}")
-        st.session_state['batch_status'] = 'preparing' # Ensure status starts as preparing
-        # Note: It's generally unsafe to call st.rerun() directly here
-        # but we need to signal the UI change.
-        # Consider if a queue/callback from thread is better long-term.
-        # For now, trying direct rerun after key state changes.
+        logger.info(f"THREAD {threading.get_ident()}: Background thread started.")
+        # Status is set to 'preparing' by the callback before thread starts
         
-        # 1. Prepare Batch (Uses mode_config)
-        logger.info("Calling prepare_batch...")
+        # 1. Prepare Batch
+        logger.info(f"THREAD {threading.get_ident()}: Calling prepare_batch...")
         batch_id_local = translation_service.prepare_batch(file_path, selected_langs, mode_config)
         
         if batch_id_local:
+            logger.info(f"THREAD {threading.get_ident()}: prepare_batch SUCCESS. Batch ID: {batch_id_local}.")
             st.session_state['current_batch_id'] = batch_id_local
-            st.session_state['batch_status'] = 'processing' # Update status
-            logger.info(f"Prepare batch SUCCESS. Batch ID: {batch_id_local}. Status -> processing.")
+            logger.info(f"THREAD {threading.get_ident()}: Setting status to 'processing'...")
+            st.session_state['batch_status'] = 'processing' 
+            logger.info(f"THREAD {threading.get_ident()}: Status set to 'processing'.")
             # NO RERUN HERE
 
-            # Get initialized clients *within the thread* from the api_clients module
+            # Get clients 
             openai_client_thread = api_clients.get_openai_client()
             
-            # 2. Process Batch (Pass clients)
-            logger.info(f"Calling process_batch for {batch_id_local}...")
+            # 2. Process Batch 
+            logger.info(f"THREAD {threading.get_ident()}: Calling process_batch for {batch_id_local}...")
             processed_data, success = translation_service.process_batch(
                 batch_id_local, 
                 openai_client_obj=openai_client_thread 
             )
-            logger.info(f"Process_batch finished for {batch_id_local}. Success: {success}")
+            logger.info(f"THREAD {threading.get_ident()}: process_batch finished. Success: {success}")
             
-            # 3. Update Final Status based on success
+            # 3. Update Final Status 
             if success:
-                st.session_state['batch_status'] = 'completed'
+                final_status = 'completed'
                 st.session_state['export_data'] = processed_data
                 base_name = os.path.splitext(uploaded_file.name)[0]
                 api_name = mode_config.get('default_api', 'unknown').lower()
                 st.session_state['export_filename'] = f"output_{base_name}_{api_name}_batch_{batch_id_local[:8]}.csv"
-                logger.info(f"Batch {batch_id_local} completed successfully. Status -> completed.")
+                logger.info(f"THREAD {threading.get_ident()}: Batch {batch_id_local} completed successfully. Status -> completed.")
             else:
-                st.session_state['batch_status'] = 'completed_with_errors'
+                final_status = 'completed_with_errors'
                 st.session_state['export_data'] = processed_data 
                 base_name = os.path.splitext(uploaded_file.name)[0]
                 api_name = mode_config.get('default_api', 'unknown').lower()
                 st.session_state['export_filename'] = f"output_{base_name}_{api_name}_batch_{batch_id_local[:8]}_ERRORS.csv"
-                logger.warning(f"Batch {batch_id_local} completed with errors. Status -> completed_with_errors.")
+                logger.warning(f"THREAD {threading.get_ident()}: Batch {batch_id_local} completed with errors. Status -> completed_with_errors.")
+            
+            logger.info(f"THREAD {threading.get_ident()}: Setting final status to '{final_status}'...")
+            st.session_state['batch_status'] = final_status
+            logger.info(f"THREAD {threading.get_ident()}: Final status set to '{final_status}'.")
+
         else:
+            logger.error(f"THREAD {threading.get_ident()}: Batch preparation failed.")
+            logger.info(f"THREAD {threading.get_ident()}: Setting status to 'failed'...")
             st.session_state['batch_status'] = 'failed'
-            logger.error("Batch preparation failed. Status -> failed.")
+            logger.info(f"THREAD {threading.get_ident()}: Status set to 'failed'.")
 
     except Exception as e:
+        logger.exception(f"THREAD {threading.get_ident()}: Critical error during background thread for batch {batch_id_local or 'UNKNOWN'}: {e}")
+        logger.info(f"THREAD {threading.get_ident()}: Setting status to 'failed' due to exception...")
         st.session_state['batch_status'] = 'failed'
-        logger.exception(f"Critical error during background thread for batch {batch_id_local or 'UNKNOWN'}: {e}")
+        logger.info(f"THREAD {threading.get_ident()}: Status set to 'failed'.")
         # Also set batch status in DB if possible
         if batch_id_local:
             try:
@@ -247,13 +254,12 @@ def run_translation_thread(file_path, selected_langs, mode_config):
             except Exception as db_e:
                 logger.error(f"Failed to update batch status to failed in DB: {db_e}")
     finally:
-        logger.info("Background thread finished.")
-        # NO FINAL RERUN HERE - Main thread handles UI updates via polling
+        logger.info(f"THREAD {threading.get_ident()}: Background thread finished.")
+        # NO RERUN HERE
 
 # --- Callback Function --- #
 def start_translation_job_callback():
-    """Callback triggered by the 'Start Translation Job' button."""
-    logger.info("'Start Translation Job' button clicked.")
+    logger.info("CALLBACK: start_translation_job_callback executing...")
     if not selected_languages: # Access selected_languages from the outer scope
         st.warning("Please select at least one language to translate.")
         return # Stop callback execution
@@ -307,12 +313,15 @@ def start_translation_job_callback():
         args=(file_path, selected_languages, final_mode_config) 
     )
     st.session_state['processing_thread'] = thread
-    st.session_state['batch_status'] = 'preparing' # Set initial status
-    st.session_state['export_data'] = None # Clear previous export data
+    logger.info("CALLBACK: Setting initial status to 'preparing'...")
+    st.session_state['batch_status'] = 'preparing' 
+    logger.info("CALLBACK: Status set to 'preparing'.")
+    st.session_state['export_data'] = None 
     st.session_state['export_filename'] = None
     thread.start()
-    logger.info("Background translation thread started.")
-    # No st.rerun() here - Streamlit handles it after button click/callback
+    logger.info("CALLBACK: Background translation thread started.")
+    logger.info("CALLBACK: start_translation_job_callback finished.")
+    # Streamlit reruns automatically after callback finishes
 
 # --- Button --- #
 # Disable button if processing
@@ -326,6 +335,7 @@ st.button(
 # --- Status Display & Refresh Loop --- #
 
 current_status = st.session_state.get('batch_status', 'idle')
+logger.info(f"UI RERUN: Current status read as '{current_status}'") # Log status read by UI
 
 # Display Status / Progress (includes spinners)
 if current_status == 'preparing':
@@ -343,8 +353,8 @@ elif current_status == 'failed':
 
 # Refresh Loop: If preparing or processing, wait and rerun
 if current_status in ['preparing', 'processing']:
-    logger.debug(f"Current status is {current_status}, sleeping and rerunning...")
-    time.sleep(2) # Wait a couple of seconds before refresh
+    logger.info(f"UI RERUN: Status is '{current_status}'. Sleeping and queueing rerun.")
+    time.sleep(5) # Increase sleep time to 5 seconds
     st.rerun()
 
 # --- Export --- #

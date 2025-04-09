@@ -6,7 +6,11 @@ import logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-logger.info(f"Initializing Celery app with broker: {config.CELERY_BROKER_URL}")
+logger.info(f"Initializing Celery app...")
+# --- Explicitly log the config values seen by this module ---
+logger.info(f"BROKER URL FROM CONFIG: '{config.CELERY_BROKER_URL}'")
+logger.info(f"BACKEND URL FROM CONFIG: '{config.CELERY_RESULT_BACKEND}'")
+# --- End Logging ---
 
 # Create Celery instance
 # The first argument is the name of the current module, important for tasks

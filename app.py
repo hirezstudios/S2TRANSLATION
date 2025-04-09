@@ -343,12 +343,11 @@ def create_app():
                 return jsonify({"error": "Invalid request body"}), 400
 
             new_review_status = data.get('review_status')
-            # Approved translation can be None (for deny) or empty string
             approved_translation = data.get('approved_translation') 
             user_id = "webapp" # Placeholder for user ID
 
             # --- Validation --- #
-            allowed_statuses = ['approved_original', 'approved_edited', 'denied']
+            allowed_statuses = ['pending_review', 'approved_original', 'approved_edited', 'denied']
             if not new_review_status or new_review_status not in allowed_statuses:
                 logger.warning(f"Invalid review status received: {new_review_status}")
                 return jsonify({"error": "Invalid review status provided"}), 400

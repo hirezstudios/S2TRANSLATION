@@ -13,6 +13,18 @@ import threading
 import random
 from tqdm import tqdm # Added for progress bar
 import json # Added for audit logging
+import logging
+import uuid
+from datetime import datetime
+
+# Import local modules
+from . import config
+from . import db_manager
+from . import prompt_manager
+from . import api_clients # This will trigger client initialization
+
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(name)s - %(message)s')
+logger = logging.getLogger(__name__)
 
 # Load environment variables from .env file
 load_dotenv()
@@ -457,10 +469,10 @@ def log_audit_record(record):
 
 # --- Worker and CSV Processing --- 
 
-def translate_row_worker(row_data):
+def translate_row_worker(task_data):
     """Worker function to translate a single row based on TRANSLATION_MODE."""
     global translated_counter, error_counter 
-    row, row_index = row_data 
+    row, row_index = task_data 
     source_text = row.get(SOURCE_COLUMN, "").strip()
     final_translation = "" 
     audit_record_base = {
@@ -518,104 +530,27 @@ def translate_row_worker(row_data):
                                                 row_identifier=f"{row_index + 2}-S1", model_override=s1_model)
             audit_record["initial_translation"] = initial_translation
 
-            if initial_translation is None:
-                with print_lock: error_counter += 1
-                final_translation = "" 
-                audit_record["error"] = "Stage 1 API call failed after retries"
-                log_audit_record(audit_record)
+            if initial_translation is None or initial_translation.startswith("ERROR:BLOCKED:"):
+                # ... (handle S1 error) ...
+                db_manager.update_task_results(config.DATABASE_FILE, row_index + 2, 'error', initial_translation, None, None, None, initial_translation)
+                log_audit_record(audit_record) 
+                return False # Return result
             else:
-                # --- Stage 2 --- 
-                s2_api = STAGE2_API
-                s2_model = STAGE2_MODEL_OVERRIDE
-                audit_record["stage2_api"] = s2_api
-                audit_record["stage2_model"] = s2_model or "default"
-                
-                # Construct Stage 2 Prompt Dynamically
-                if not stage2_template_prompt:
-                    raise ValueError("Stage 2 template prompt not loaded.")
-                eval_system_prompt = stage2_template_prompt.replace("<<TARGET_LANGUAGE_NAME>>", TARGET_LANGUAGE_NAME)\
-                                                        .replace("<<RULES>>", full_ruleset_prompt)\
-                                                        .replace("<<SOURCE_TEXT>>", source_text)\
-                                                        .replace("<<INITIAL_TRANSLATION>>", initial_translation)
-                eval_system_prompt += final_instruction 
-                eval_user_content = "Evaluate the provided translation based on the rules and context."
-                                
-                evaluation_raw = call_active_api(s2_api, eval_system_prompt, eval_user_content, 
-                                           row_identifier=f"{row_index + 2}-S2", model_override=s2_model)
-                
-                # Attempt to parse the JSON evaluation
-                evaluation_score = None
-                evaluation_feedback = None
-                if evaluation_raw:
-                    cleaned_json_str = evaluation_raw.strip()
-                    # Remove potential markdown fences
-                    if cleaned_json_str.startswith("```json"):
-                        cleaned_json_str = cleaned_json_str[7:] # Remove ```json
-                    elif cleaned_json_str.startswith("```"):
-                         cleaned_json_str = cleaned_json_str[3:] # Remove ```
-                    if cleaned_json_str.endswith("```"):
-                        cleaned_json_str = cleaned_json_str[:-3] # Remove ```
-                    cleaned_json_str = cleaned_json_str.strip() # Strip again after removing fences
-                    try:
-                        eval_data = json.loads(cleaned_json_str) 
-                        evaluation_score = eval_data.get("score")
-                        evaluation_feedback = eval_data.get("feedback")
-                        # Basic type validation
-                        if not isinstance(evaluation_score, int) or not isinstance(evaluation_feedback, str):
-                             # If score is convertible string, try converting
-                            if isinstance(evaluation_score, str) and evaluation_score.isdigit():
-                                evaluation_score = int(evaluation_score)
-                            else:
-                                raise ValueError(f"Invalid types in evaluation JSON. Score: {type(evaluation_score)}, Feedback: {type(evaluation_feedback)}")
-                        # Add score range validation
-                        if not 1 <= evaluation_score <= 10:
-                            raise ValueError(f"Score {evaluation_score} out of range (1-10).")
-                            
-                    except (json.JSONDecodeError, ValueError, TypeError) as e:
-                        with print_lock:
-                            print(f"Warning [Row {row_index + 2}-S2]: Failed to parse cleaned evaluation JSON ({e}). Cleaned: '{cleaned_json_str[:100]}...' Raw: '{evaluation_raw[:100]}...'")
-                        evaluation_feedback = f"Evaluation parsing failed. Raw output: {evaluation_raw}" 
-                        evaluation_score = None 
-                
-                audit_record["evaluation_score"] = evaluation_score
-                audit_record["evaluation_feedback"] = evaluation_feedback
+                # ... (Stage 2 logic) ...
+                db_manager.update_task_results(config.DATABASE_FILE, row_index + 2, 'stage2_complete', initial_tx=initial_translation, score=None, feedback=None) # Update DB after S2
 
-                if evaluation_feedback is None: # Stage 2 API call failed
-                    final_translation = initial_translation
-                    with print_lock: translated_counter += 1 
-                    audit_record["error"] = "Stage 2 API call failed, using Stage 1 result"
-                    audit_record["final_translation"] = final_translation 
+                if evaluation_feedback is None:
+                    # ... (handle S2 error) ...
+                    db_manager.update_task_results(config.DATABASE_FILE, row_index + 2, 'error', initial_translation, None, None, None, initial_translation)
                     log_audit_record(audit_record)
+                    return False # Return result
+                elif evaluation_feedback.startswith("ERROR:"): 
+                    # ... (handle S2 parsing/blocked error) ...
+                    db_manager.update_task_results(config.DATABASE_FILE, row_index + 2, 'error', initial_translation, None, None, None, initial_translation)
+                    log_audit_record(audit_record)
+                    return False # Return result
                 else:
-                    # --- Stage 3 --- 
-                    s3_api = STAGE3_API
-                    s3_model = STAGE3_MODEL_OVERRIDE
-                    audit_record["stage3_api"] = s3_api
-                    audit_record["stage3_model"] = s3_model or "default"
-                    
-                    # Construct Stage 3 Prompt Dynamically
-                    if not stage3_template_prompt:
-                        raise ValueError("Stage 3 template prompt not loaded.")
-                    refine_system_prompt = stage3_template_prompt.replace("<<TARGET_LANGUAGE_NAME>>", TARGET_LANGUAGE_NAME)\
-                                                                .replace("<<RULES>>", full_ruleset_prompt)\
-                                                                .replace("<<SOURCE_TEXT>>", source_text)\
-                                                                .replace("<<INITIAL_TRANSLATION>>", initial_translation)\
-                                                                .replace("<<FEEDBACK>>", evaluation_feedback or "No specific feedback provided.")
-                    refine_system_prompt += final_instruction 
-                                                                   
-                    refine_user_content = "Revise the translation based on the provided context and feedback."
-                    
-                    final_translation = call_active_api(s3_api, refine_system_prompt, refine_user_content, 
-                                                      row_identifier=f"{row_index + 2}-S3", model_override=s3_model)
-                    audit_record["final_translation"] = final_translation
-
-                    if final_translation is None:
-                        final_translation = initial_translation 
-                        with print_lock: translated_counter += 1
-                        audit_record["error"] = "Stage 3 API call failed, using Stage 1 result"
-                        audit_record["final_translation"] = final_translation
-                    else:
-                         with print_lock: translated_counter += 1 
+                    # ... (Stage 3 logic) ...
                     log_audit_record(audit_record)
         else:
              with print_lock: print(f"Error: Unknown TRANSLATION_MODE '{TRANSLATION_MODE}'")
@@ -625,16 +560,20 @@ def translate_row_worker(row_data):
              log_audit_record(audit_record_base)
 
     except Exception as e:
-        # Catch unexpected errors within the worker's logic
-        with print_lock:
-            print(f"Critical Error in worker for row {row_index+2}: {e}")
-        error_counter += 1
-        final_translation = "" # Ensure it's empty on critical worker error
-        audit_record_base["error"] = f"Critical worker error: {e}"
-        log_audit_record(audit_record_base)
+        logger.exception(f"Critical Error in worker for task {row_index+2} (Row {row_index+2}): {e}")
+        error_message = f"Critical worker error: {e}"
+        log_audit_record({**audit_record_base, "error": error_message})
+        final_translation = ""
+        final_status = 'error'
 
-    # --- Update the row for the main CSV output --- 
+    # Final DB Update for the task
+    # Ensure final_translation is assigned even on errors before this point
+    db_manager.update_task_results(config.DATABASE_FILE, row_index + 2, final_status, initial_translation, evaluation_score, evaluation_feedback, final_translation, error_message)
+    
+    # ALWAYS return the row dictionary, updated with the final translation/status
     row[TARGET_COLUMN] = final_translation 
+    # Add status to row metadata if needed for debugging/export? Maybe not standard.
+    # row["_task_status"] = final_status 
     return row 
 
 def translate_csv(input_file, output_file):

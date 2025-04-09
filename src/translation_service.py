@@ -459,7 +459,7 @@ def log_audit_record(record):
         with print_lock:
             print(f"Error writing to audit log: {e}")
 
-# --- Translation Worker --- 
+# --- Translation Worker (called by thread pool within run_batch_background) --- 
 def translate_row_worker(task_data, worker_config):
     """Worker function for a single translation task. Fetches data, translates, updates DB."""
     # Expand task_data dictionary
@@ -660,67 +660,79 @@ def translate_row_worker(task_data, worker_config):
     task_data_copy['final_status'] = final_status
     return task_data_copy 
 
-# --- Batch Processing --- 
-def process_batch(batch_id, openai_client_obj=None):
-    """Processes all pending tasks for a given batch_id using thread pool."""
-    logger.info(f"Starting processing for batch_id: {batch_id}")
-    db_path = config.DATABASE_FILE # Get DB path once
+# --- Background Batch Processing Function (Target for Flask's Thread) ---
+def run_batch_background(batch_id):
+    """Processes all pending tasks for a given batch_id using thread pool.
+       This function runs in a background thread started by Flask."""
+    logger.info(f"BACKGROUND THREAD: Starting processing for batch_id: {batch_id}")
+    db_path = config.DATABASE_FILE 
     
-    # Retrieve batch config from DB
-    batch_info = db_manager.get_batch_info(db_path, batch_id) # New function needed
+    # Retrieve batch config from DB - needed for worker config
+    batch_info = db_manager.get_batch_info(db_path, batch_id)
     if not batch_info:
-        logger.error(f"Cannot process batch: Batch info not found for {batch_id}")
-        return [], False
+        logger.error(f"BACKGROUND THREAD: Cannot process batch: Batch info not found for {batch_id}")
+        return # Exit thread
     try:
         batch_config = json.loads(batch_info['config_details'])
     except Exception as e:
-        logger.error(f"Cannot process batch {batch_id}: Failed to parse config_details - {e}")
+        logger.error(f"BACKGROUND THREAD: Cannot process batch {batch_id}: Failed to parse config_details - {e}")
         db_manager.update_batch_status(db_path, batch_id, 'failed')
-        return [], False
+        return # Exit thread
         
     tasks_to_process = db_manager.get_pending_tasks(db_path, batch_id)
     total_tasks = len(tasks_to_process)
     if total_tasks == 0:
-        logger.info(f"No pending tasks found for batch_id: {batch_id}")
+        logger.info(f"BACKGROUND THREAD: No pending tasks found for batch_id: {batch_id}")
         db_manager.update_batch_status(db_path, batch_id, 'completed_empty')
-        return [], True 
+        return # Exit thread
 
-    logger.info(f"Processing {total_tasks} tasks for batch {batch_id} (Mode: {batch_config.get('mode')}) using up to {config.MAX_WORKER_THREADS} threads...")
-    db_manager.update_batch_status(db_path, batch_id, 'processing')
+    logger.info(f"BACKGROUND THREAD: Processing {total_tasks} tasks for batch {batch_id} (Mode: {batch_config.get('mode')}) using up to {config.MAX_WORKER_THREADS} threads...")
+    # Update DB status to processing (already done by prepare_batch, but can confirm)
+    db_manager.update_batch_status(db_path, batch_id, 'processing') 
     
     success_count = 0
     error_count = 0
     
-    # Prepare worker_config including clients
+    # Prepare worker_config based on the stored batch config
+    # Retrieve initialized client if needed
+    openai_client_thread = api_clients.get_openai_client() # Get client instance for this thread
     worker_config = {
         'db_path': db_path,
         'translation_mode': batch_config.get('mode', 'ONE_STAGE'),
-        'default_api': batch_config.get('default_api'), # Used by ONE_STAGE
+        'default_api': batch_config.get('default_api'),
         'stage1_api': batch_config.get('s1_api'),
         'stage2_api': batch_config.get('s2_api'),
         'stage3_api': batch_config.get('s3_api'),
-        'stage1_model': batch_config.get('s1_model'), # Overrides passed directly
+        'stage1_model': batch_config.get('s1_model'),
         'stage2_model': batch_config.get('s2_model'),
         'stage3_model': batch_config.get('s3_model'),
-        'target_column_tpl': config.TARGET_COLUMN_TPL, # Still from general config
-        'openai_client': openai_client_obj,
+        'target_column_tpl': config.TARGET_COLUMN_TPL,
+        'openai_client': openai_client_thread, # Pass client object
     }
     
     processed_task_results = {} 
 
+    # Use ThreadPoolExecutor for row-level parallelism within this background thread
     with concurrent.futures.ThreadPoolExecutor(max_workers=config.MAX_WORKER_THREADS) as executor:
         future_to_task_id = {executor.submit(translate_row_worker, dict(task), worker_config): task['task_id'] for task in tasks_to_process}
+        
         for future in tqdm(concurrent.futures.as_completed(future_to_task_id), total=total_tasks, desc=f"Translating Batch {batch_id}"):
             task_id = future_to_task_id[future]
             try:
                 updated_task_data = future.result()
-                if updated_task_data:
-                    processed_task_results[task_id] = updated_task_data
+                if updated_task_data: 
+                    # We don't need to reconstruct the full row data here anymore
+                    # Just track success/error based on final status
                     if updated_task_data.get('final_status') == 'completed':
                         success_count += 1
                     else:
-                        error_count += 1
+                        error_count += 1 # Assume any non-'completed' is an error for batch status
+                else: # Worker returned None (e.g., skipped empty source)
+                    pass # Don't count as success or error for batch status?
+                         # Or count as success? Let's count as success.
+                    success_count += 1
             except Exception as exc:
+                # Find original task info for logging
                 original_task = next((t for t in tasks_to_process if t['task_id'] == task_id), None)
                 row_idx = original_task['row_index_in_file']+1 if original_task else '?'
                 lang = original_task['language_code'] if original_task else '??'
@@ -731,36 +743,15 @@ def process_batch(batch_id, openai_client_obj=None):
                 except Exception as db_exc:
                     logger.error(f"Failed to update task status to error after future exception: {db_exc}")
 
-    logger.info(f"Batch {batch_id} processing finished.")
-    logger.info(f"Successfully completed tasks (incl. fallbacks): {success_count}")
-    logger.info(f"Tasks ending in error state: {error_count}")
+    logger.info(f"BACKGROUND THREAD: Batch {batch_id} processing finished in thread.")
+    logger.info(f"BACKGROUND THREAD: Successfully completed tasks: {success_count}")
+    logger.info(f"BACKGROUND THREAD: Tasks ending in error state: {error_count}")
     
-    final_batch_status = 'completed' if error_count == 0 and success_count == total_tasks else 'completed_with_errors' 
+    # Determine final batch status based ONLY on task errors
+    final_batch_status = 'completed' if error_count == 0 else 'completed_with_errors' 
     db_manager.update_batch_status(db_path, batch_id, final_batch_status)
-    
-    reconstructed_data_dict = {}
-    all_metadata_keys = set()
-    all_target_cols = set()
-    original_tasks_dict = {t['task_id']: dict(t) for t in tasks_to_process}
-
-    for task_id, result_data in processed_task_results.items():
-        original_task = original_tasks_dict.get(task_id)
-        if not original_task: continue 
-        row_index = original_task['row_index_in_file']
-        lang_code = original_task['language_code']
-        final_translation = result_data.get('final_translation', '') 
-        metadata_json = original_task['metadata_json']
-        try: metadata = json.loads(metadata_json or '{}')
-        except: metadata = {}
-        all_metadata_keys.update(metadata.keys())
-        target_col = config.TARGET_COLUMN_TPL.format(lang_code=lang_code)
-        all_target_cols.add(target_col)
-        if row_index not in reconstructed_data_dict:
-            reconstructed_data_dict[row_index] = {config.SOURCE_COLUMN: original_task['source_text'], **metadata}
-        reconstructed_data_dict[row_index][target_col] = final_translation
-
-    reconstructed_data_list = [reconstructed_data_dict[idx] for idx in sorted(reconstructed_data_dict.keys())]
-    return reconstructed_data_list, error_count == 0
+    logger.info(f"BACKGROUND THREAD: Final batch status {final_batch_status} updated in DB for {batch_id}.")
+    # This function doesn't need to return data, it just updates the DB
 
 # --- Input Processing --- 
 def prepare_batch(input_file_path, selected_languages, mode_config):
@@ -810,7 +801,7 @@ def prepare_batch(input_file_path, selected_languages, mode_config):
     return batch_id
 
 # --- Export --- #
-def generate_export(batch_id, output_path, processed_data):
+def generate_export(batch_id, output_file_path):
     """DEPRECATED / Example: Generates export file from processed data."""
     # This function structure is more suitable for direct script execution.
     # For Streamlit, app.py will call prepare_batch and process_batch separately.
@@ -871,7 +862,7 @@ def translate_csv(input_file, output_file):
              # Construct output path based on input filename and config
              output_filename = f"output_{os.path.splitext(os.path.basename(input_file))[0]}_{config.DEFAULT_API.lower()}_batch_{batch_id[:8]}.csv"
              output_path = os.path.join(config.OUTPUT_DIR, output_filename)
-             generate_export(batch_id, output_path, processed_data=processed_data) 
+             generate_export(batch_id, output_path) 
              print(f"Processing complete. Check DB ({config.DATABASE_FILE}) and audit log ({config.AUDIT_LOG_FILE})")
              print(f"Main output attempt saved to: {output_path}")
         else:
@@ -879,31 +870,6 @@ def translate_csv(input_file, output_file):
     else:
         print("Batch preparation failed.")
 
-# --- Main execution (Example CLI usage) --- #
-if __name__ == "__main__":
-    # Explicitly reload config to ensure latest .env values are used
-    import importlib
-    importlib.reload(config)
-    importlib.reload(db_manager) # Reload modules using config too
-    importlib.reload(prompt_manager)
-    importlib.reload(api_clients)
-    
-    # Initialize DB explicitly if running standalone
-    # This might now be redundant if config reload works, but keep for safety
-    db_manager.initialize_database(config.DATABASE_FILE)
-    
-    logger.info("Running translation service CLI entry point...")
-    
-    # Example: Process a specific file with specific languages
-    # In real app, these would come from UI or arguments
-    input_filename = "blake-small.csv" # Example input filename
-    input_filepath = os.path.join(config.INPUT_CSV_DIR, input_filename) 
-
-    if not os.path.exists(input_filepath):
-        logger.error(f"Input file not found: {input_filepath}")
-        exit(1)
-
-    # Call the (now example) translate_csv function
-    # In the future, we might call prepare_batch and process_batch directly here
-    # based on command-line arguments.
-    translate_csv(input_filepath, None) # Output path is now determined inside generate_export 
+# --- REMOVE Old Process Batch and Main Execution Block --- #
+# def process_batch(...): ... # Remove this old function
+# if __name__ == "__main__": ... # Remove this block 

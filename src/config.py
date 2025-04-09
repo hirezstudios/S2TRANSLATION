@@ -23,10 +23,6 @@ OPENAI_MODEL = os.getenv("OPENAI_MODEL")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 GEMINI_MODEL = os.getenv("GEMINI_MODEL")
 
-# --- Celery / Redis --- #
-CELERY_BROKER_URL = os.getenv("CELERY_BROKER_URL", "redis://localhost:6379/0").split('#')[0].strip().strip('"').strip("'")
-CELERY_RESULT_BACKEND = os.getenv("CELERY_RESULT_BACKEND", "redis://localhost:6379/0").split('#')[0].strip().strip('"').strip("'")
-
 # --- Workflow Configuration ---
 TRANSLATION_MODE = os.getenv("TRANSLATION_MODE", "ONE_STAGE").split('#')[0].strip().strip('"').strip("'").upper()
 DEFAULT_API = os.getenv("ACTIVE_API", "PERPLEXITY").split('#')[0].strip().strip('"').strip("'").upper()

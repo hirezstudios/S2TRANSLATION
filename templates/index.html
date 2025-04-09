@@ -4,7 +4,7 @@
 
 {% block content %}
     <h2>1. Upload & Configure</h2>
-    <form id="upload-form" action="{{ url_for('start_job') }}" method="post" enctype="multipart/form-data">
+    <form id="upload-form" method="post" enctype="multipart/form-data">
         <div class="mb-3">
             <label for="csvfile" class="form-label">Input CSV File</label>
             <input class="form-control" type="file" id="csvfile" name="file" accept=".csv" required>
@@ -12,9 +12,8 @@
 
         <div class="mb-3">
             <label class="form-label">Languages to Translate</label>
-            <!-- Language options will be populated dynamically by JS after upload -->
-            <div id="language-options">
-                <p class="text-muted">Upload a file to see available languages.</p>
+            <div id="language-options" class="border p-2 rounded" style="min-height: 50px;">
+                <small class="text-muted">Upload a file to see available languages.</small>
             </div>
         </div>
 
@@ -36,42 +35,41 @@
                 <label class="form-label">API Configuration</label>
                 <div id="api-config-one-stage">
                     <select class="form-select mb-2" name="one_stage_api" id="one_stage_api">
-                        <!-- Options populated by JS/Config -->
-                         <option value="GEMINI">GEMINI</option> 
-                         <option value="OPENAI">OPENAI</option> 
-                         <option value="PERPLEXITY">PERPLEXITY</option> 
+                        {% for api in valid_apis %}
+                        <option value="{{ api }}" {% if api == default_apis.ONE_STAGE %}selected{% endif %}>{{ api }}</option>
+                        {% endfor %}
                     </select>
                     <input type="text" class="form-control" name="one_stage_model" placeholder="Optional Model Override">
                 </div>
                 <div id="api-config-three-stage" style="display: none;">
                      <label class="form-label small">Stage 1 API:</label>
                      <select class="form-select mb-1" name="s1_api" id="s1_api">
-                         <option value="GEMINI">GEMINI</option> 
-                         <option value="OPENAI">OPENAI</option> 
-                         <option value="PERPLEXITY">PERPLEXITY</option> 
+                        {% for api in valid_apis %}
+                        <option value="{{ api }}" {% if api == default_apis.S1 %}selected{% endif %}>{{ api }}</option>
+                        {% endfor %}
                      </select>
                      <input type="text" class="form-control mb-2" name="s1_model" placeholder="S1 Model Override">
                      
                      <label class="form-label small">Stage 2 API:</label>
                      <select class="form-select mb-1" name="s2_api" id="s2_api">
-                         <option value="GEMINI">GEMINI</option> 
-                         <option value="OPENAI">OPENAI</option> 
-                         <option value="PERPLEXITY">PERPLEXITY</option> 
+                         {% for api in valid_apis %}
+                        <option value="{{ api }}" {% if api == default_apis.S2 %}selected{% endif %}>{{ api }}</option>
+                        {% endfor %}
                      </select>
                      <input type="text" class="form-control mb-2" name="s2_model" placeholder="S2 Model Override">
 
                      <label class="form-label small">Stage 3 API:</label>
                      <select class="form-select mb-1" name="s3_api" id="s3_api">
-                         <option value="GEMINI">GEMINI</option> 
-                         <option value="OPENAI">OPENAI</option> 
-                         <option value="PERPLEXITY">PERPLEXITY</option> 
+                         {% for api in valid_apis %}
+                        <option value="{{ api }}" {% if api == default_apis.S3 %}selected{% endif %}>{{ api }}</option>
+                        {% endfor %}
                      </select>
                      <input type="text" class="form-control" name="s3_model" placeholder="S3 Model Override">
                 </div>
             </div>
         </div>
 
-        <button type="submit" class="btn btn-primary">Start Translation Job</button>
+        <button type="button" id="start-job-btn" class="btn btn-primary">Start Translation Job</button>
     </form>
 
     <hr>
@@ -79,23 +77,35 @@
     <div id="status-area">
         <p>Upload a file and start a job to see status.</p>
     </div>
-    <div id="progress-area"></div>
+    <div id="progress-area" class="progress my-2" style="height: 20px; display: none;">
+        <div id="progress-bar" class="progress-bar progress-bar-striped progress-bar-animated" role="progressbar" style="width: 0%" aria-valuenow="0" aria-valuemin="0" aria-valuemax="100">0%</div>
+    </div>
 
     <hr>
     <h2>3. Export Results</h2>
     <div id="export-area">
-         <!-- Download button will be added here by JS when job is complete -->
+         <!-- Download link will be added here -->
     </div>
 
 {% endblock %}
 
 {% block scripts %}
 <script>
-    // Basic JS for mode selection UI toggle
+    const fileInput = document.getElementById('csvfile');
+    const langOptionsDiv = document.getElementById('language-options');
+    const startBtn = document.getElementById('start-job-btn');
+    const uploadForm = document.getElementById('upload-form');
+    const statusArea = document.getElementById('status-area');
+    const progressArea = document.getElementById('progress-area');
+    const progressBar = document.getElementById('progress-bar');
+    const exportArea = document.getElementById('export-area');
+    let currentBatchId = null;
+    let statusInterval = null;
+
+    // --- Toggle API Config UI --- 
     const modeRadios = document.querySelectorAll('input[name="mode"]');
     const oneStageConfig = document.getElementById('api-config-one-stage');
     const threeStageConfig = document.getElementById('api-config-three-stage');
-
     function toggleApiConfig() {
         if (document.getElementById('mode_one').checked) {
             oneStageConfig.style.display = 'block';
@@ -106,16 +116,197 @@
         }
     }
     modeRadios.forEach(radio => radio.addEventListener('change', toggleApiConfig));
-    // Initial call
-    toggleApiConfig();
+    toggleApiConfig(); // Initial call
 
-    // TODO: Add JS for:
-    // 1. Reading file header on upload to populate language options dynamically.
-    // 2. Submitting the form via Fetch API to /start_job.
-    // 3. Handling the response from /start_job (getting batch_id).
-    // 4. Connecting to SSE endpoint /stream/<batch_id>.
-    // 5. Updating #status-area and #progress-area based on SSE messages.
-    // 6. Adding download button to #export-area when job complete SSE message received.
+    // --- Fetch Valid Languages on File Change --- 
+    fileInput.addEventListener('change', async (event) => {
+        langOptionsDiv.innerHTML = '<p class="text-muted">Fetching available languages...</p>';
+        startBtn.disabled = true;
+        const file = event.target.files[0];
+        if (!file) return;
+
+        // Need to upload the file temporarily to get its path on the server
+        // For simplicity, let's just send the file to the get_valid_languages endpoint directly
+        // NOTE: This is inefficient as the file is sent twice (once here, once for job start)
+        // A better approach would be one upload endpoint that returns path + valid langs.
+        // Or, read header client-side if possible (requires JS CSV parsing).
+        // Let's proceed with double-send for now.
+        const formData = new FormData();
+        formData.append('file', file);
+
+        try {
+            // Temporary upload just to get the header processed server-side
+            const tempUploadResponse = await fetch("{{ url_for('upload_temp_file') }}", { // Need this route
+                 method: 'POST',
+                 body: formData
+            });
+            if (!tempUploadResponse.ok) throw new Error('Failed temporary file upload');
+            const tempFileData = await tempUploadResponse.json();
+            const tempFilePath = tempFileData.file_path;
+
+            // Now get valid languages using the temp path
+            const langResponse = await fetch("{{ url_for('get_valid_languages_route') }}", {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ file_path: tempFilePath })
+            });
+            if (!langResponse.ok) throw new Error('Failed to fetch valid languages');
+            const langData = await langResponse.json();
+            
+            populateLanguageOptions(langData.valid_languages);
+
+        } catch (error) {
+            console.error('Error fetching languages:', error);
+            langOptionsDiv.innerHTML = '<p class="text-danger">Error fetching languages.</p>';
+        }
+    });
+
+    function populateLanguageOptions(languages) {
+        langOptionsDiv.innerHTML = ''; // Clear previous
+        if (!languages || languages.length === 0) {
+            langOptionsDiv.innerHTML = '<p class="text-warning">No translatable languages found in file/config.</p>';
+            startBtn.disabled = true;
+            return;
+        }
+        
+        languages.forEach(lang => {
+            const div = document.createElement('div');
+            div.classList.add('form-check', 'form-check-inline');
+            const input = document.createElement('input');
+            input.classList.add('form-check-input');
+            input.type = 'checkbox';
+            input.value = lang;
+            input.id = `lang_${lang}`;
+            input.name = 'languages'; // Use same name for all
+            input.checked = true; // Default to checked
+            const label = document.createElement('label');
+            label.classList.add('form-check-label');
+            label.htmlFor = `lang_${lang}`;
+            label.textContent = lang;
+            div.appendChild(input);
+            div.appendChild(label);
+            langOptionsDiv.appendChild(div);
+        });
+        startBtn.disabled = false; // Enable start button
+    }
+
+    // --- Handle Job Start --- 
+    startBtn.addEventListener('click', async () => {
+        const formData = new FormData(uploadForm); // Collect all form data
+        // Check if file is still selected (it might be cleared by browser)
+        if (!fileInput.files || fileInput.files.length === 0) {
+             setStatus('Error: No file selected. Please re-select the file.', 'danger');
+             return;
+        }
+        // Check if any languages are selected
+        const selectedLangs = formData.getAll('languages');
+        if (selectedLangs.length === 0) {
+             setStatus('Error: No languages selected.', 'danger');
+             return;
+        }
+
+        setStatus('Starting job...', 'info');
+        startBtn.disabled = true;
+        stopStatusPolling(); // Stop previous polling if any
+        progressBar.style.width = '0%';
+        progressBar.textContent = '0%';
+        progressArea.style.display = 'none'; 
+        exportArea.innerHTML = '';
+
+        try {
+            const response = await fetch("{{ url_for('start_job') }}", {
+                method: 'POST',
+                body: formData
+            });
+            const data = await response.json();
+
+            if (response.ok) {
+                currentBatchId = data.batch_id;
+                setStatus(`Job ${currentBatchId} started. Waiting for progress...`, 'info');
+                progressArea.style.display = 'block'; 
+                startStatusPolling(currentBatchId);
+            } else {
+                setStatus(`Error starting job: ${data.error || 'Unknown error'}`, 'danger');
+                startBtn.disabled = false;
+            }
+        } catch (error) {
+            console.error('Error starting job:', error);
+            setStatus(`Error starting job: ${error}`, 'danger');
+            startBtn.disabled = false;
+        }
+    });
+
+    // --- Status Polling --- 
+    function startStatusPolling(batchId) {
+        if (statusInterval) clearInterval(statusInterval);
+        statusInterval = setInterval(async () => {
+            if (!currentBatchId) {
+                stopStatusPolling();
+                return;
+            }
+            try {
+                const response = await fetch(`/status/${currentBatchId}`);
+                if (!response.ok) {
+                    // Handle non-OK responses (e.g., 404 if batch ID is wrong initially)
+                    setStatus(`Error fetching status: ${response.statusText}`, 'warning');
+                    // Should we stop polling on non-OK? Maybe after a few tries.
+                    // For now, let it continue, might recover.
+                    return; 
+                }
+                const data = await response.json();
+                updateStatusUI(data);
+                if (data.batch_status === 'completed' || data.batch_status === 'completed_with_errors' || data.batch_status === 'failed' || data.batch_status === 'completed_empty') {
+                    stopStatusPolling();
+                }
+            } catch (error) {
+                console.error('Error polling status:', error);
+                setStatus(`Error polling status: ${error}`, 'warning');
+                // Maybe stop polling after several consecutive errors?
+            }
+        }, 3000); // Poll every 3 seconds
+    }
+
+    function stopStatusPolling() {
+        if (statusInterval) {
+            clearInterval(statusInterval);
+            statusInterval = null;
+            startBtn.disabled = false; // Re-enable start button
+            console.log('Status polling stopped.');
+        }
+    }
+
+    function updateStatusUI(data) {
+        let statusText = `Batch ${data.batch_id}: ${data.batch_status}`; 
+        let progressPercent = 0;
+        if(data.total_tasks > 0) {
+            progressPercent = Math.round(((data.completed_tasks + data.error_tasks) / data.total_tasks) * 100);
+            statusText += ` (${data.completed_tasks + data.error_tasks}/${data.total_tasks} tasks processed)`;
+        }
+        progressBar.style.width = `${progressPercent}%`;
+        progressBar.textContent = `${progressPercent}%`;
+        progressBar.setAttribute('aria-valuenow', progressPercent);
+        
+        let alertClass = 'info';
+        if (data.batch_status === 'completed') alertClass = 'success';
+        else if (data.batch_status === 'failed' || data.error_tasks > 0) alertClass = 'danger';
+        else if (data.batch_status === 'completed_with_errors') alertClass = 'warning';
+        
+        setStatus(statusText, alertClass);
+
+        // Add download button on completion
+        if ((data.batch_status === 'completed' || data.batch_status === 'completed_with_errors') && data.total_tasks > 0) {
+             exportArea.innerHTML = ''; // Clear previous
+             const downloadLink = document.createElement('a');
+             downloadLink.href = `/export/${data.batch_id}`;
+             downloadLink.textContent = 'Download Output CSV';
+             downloadLink.classList.add('btn', 'btn-success');
+             exportArea.appendChild(downloadLink);
+        }
+    }
+
+    function setStatus(message, type = 'info') { // type: info, success, warning, danger
+        statusArea.innerHTML = `<div class="alert alert-${type}" role="alert">${message}</div>`;
+    }
 
 </script>
 {% endblock %} 

@@ -5,6 +5,7 @@ import uuid
 import json
 import threading
 from werkzeug.utils import secure_filename
+import pandas as pd # Make sure pandas is imported
 
 # Import backend modules
 from src import config
@@ -29,8 +30,70 @@ def create_app():
 
     @app.route('/')
     def index():
-        """Main dashboard page."""
-        return render_template('index.html')
+        # Pass available APIs for dynamic population? Or handle in JS?
+        # Let's pass defaults for now.
+        default_apis = {
+            'ONE_STAGE': config.DEFAULT_API,
+            'S1': config.STAGE1_API,
+            'S2': config.STAGE2_API,
+            'S3': config.STAGE3_API
+        }
+        return render_template('index.html', valid_apis=config.VALID_APIS, default_apis=default_apis)
+
+    @app.route('/upload_temp_file', methods=['POST'])
+    def upload_temp_file():
+        """Temporarily saves uploaded file for header reading."""
+        if 'file' not in request.files:
+            return jsonify({"error": "No file part"}), 400
+        file = request.files['file']
+        if not file or not file.filename:
+            return jsonify({"error": "No selected file or filename missing"}), 400
+        
+        filename = secure_filename(file.filename)
+        temp_dir = "temp_uploads"
+        os.makedirs(temp_dir, exist_ok=True)
+        temp_filename = f"{uuid.uuid4()}_{filename}"
+        file_path = os.path.join(temp_dir, temp_filename)
+        try:
+            file.save(file_path)
+            logger.info(f"Temp file saved for header check: {file_path}")
+            # We should probably delete this file after use in get_valid_languages
+            # Or have a cleanup job
+            return jsonify({"file_path": file_path}), 200
+        except Exception as e:
+            logger.error(f"Failed to save temp file: {e}", exc_info=True)
+            return jsonify({"error": "Failed to save temporary file"}), 500
+
+    @app.route('/get_valid_languages', methods=['POST'])
+    def get_valid_languages_route():
+        """Reads temp file header and returns valid languages."""
+        logger.info("Received request to /get_valid_languages")
+        data = request.get_json()
+        temp_file_path = data.get('file_path')
+        
+        if not temp_file_path or not os.path.exists(temp_file_path):
+            logger.error(f"File path missing or file not found: {temp_file_path}")
+            return jsonify({"error": "File not found or path missing."}), 400
+            
+        valid_languages = []
+        try:
+            df_header = pd.read_csv(temp_file_path, nrows=0)
+            header = df_header.columns.tolist()
+            logger.info(f"Read header for validation: {header}")
+            
+            potential_langs = {col[3:] for col in header if col.startswith("tg_")}
+            
+            # Intersect with configured languages and those with prompts
+            for lang_code in config.AVAILABLE_LANGUAGES:
+                if lang_code in potential_langs and lang_code in prompt_manager.stage1_templates:
+                    valid_languages.append(lang_code)
+                    
+            logger.info(f"Valid languages identified: {valid_languages}")
+            return jsonify({"valid_languages": sorted(valid_languages)}), 200
+            
+        except Exception as e:
+            logger.error(f"Error processing header for {temp_file_path}: {e}", exc_info=True)
+            return jsonify({"error": "Failed to process file header."}), 500
 
     @app.route('/start_job', methods=['POST'])
     def start_job():

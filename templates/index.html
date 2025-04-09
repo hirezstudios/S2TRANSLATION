@@ -81,12 +81,6 @@
         <div id="progress-bar" class="progress-bar progress-bar-striped progress-bar-animated" role="progressbar" style="width: 0%" aria-valuenow="0" aria-valuemin="0" aria-valuemax="100">0%</div>
     </div>
 
-    <hr>
-    <h2>3. Export Results</h2>
-    <div id="export-area">
-         <!-- Download link will be added here -->
-    </div>
-
 {% endblock %}
 
 {% block scripts %}
@@ -98,9 +92,6 @@
     const statusArea = document.getElementById('status-area');
     const progressArea = document.getElementById('progress-area');
     const progressBar = document.getElementById('progress-bar');
-    const exportArea = document.getElementById('export-area');
-    let currentBatchId = null;
-    let statusInterval = null;
 
     // --- Toggle API Config UI --- 
     const modeRadios = document.querySelectorAll('input[name="mode"]');
@@ -207,11 +198,9 @@
 
         setStatus('Starting job...', 'info');
         startBtn.disabled = true;
-        stopStatusPolling(); // Stop previous polling if any
         progressBar.style.width = '0%';
         progressBar.textContent = '0%';
         progressArea.style.display = 'none'; 
-        exportArea.innerHTML = '';
 
         try {
             const response = await fetch("{{ url_for('start_job') }}", {
@@ -221,10 +210,9 @@
             const data = await response.json();
 
             if (response.ok) {
-                currentBatchId = data.batch_id;
-                setStatus(`Job ${currentBatchId} started. Waiting for progress...`, 'info');
+                setStatus(`Job ${data.batch_id} started. Waiting for progress...`, 'info');
                 progressArea.style.display = 'block'; 
-                startStatusPolling(currentBatchId);
+                startStatusPolling(data.batch_id);
             } else {
                 setStatus(`Error starting job: ${data.error || 'Unknown error'}`, 'danger');
                 startBtn.disabled = false;
@@ -240,12 +228,8 @@
     function startStatusPolling(batchId) {
         if (statusInterval) clearInterval(statusInterval);
         statusInterval = setInterval(async () => {
-            if (!currentBatchId) {
-                stopStatusPolling();
-                return;
-            }
             try {
-                const response = await fetch(`/status/${currentBatchId}`);
+                const response = await fetch(`/status/${batchId}`);
                 if (!response.ok) {
                     // Handle non-OK responses (e.g., 404 if batch ID is wrong initially)
                     setStatus(`Error fetching status: ${response.statusText}`, 'warning');
@@ -293,37 +277,26 @@
         
         setStatus(statusText, alertClass);
 
-        exportArea.innerHTML = ''; 
+        // Add View/Edit Results link on completion (REMOVE export links)
+        // Clear any previous links/buttons first
+        const actionArea = statusArea; // Or add a dedicated area below status?
+        const existingLink = actionArea.querySelector('.results-link');
+        if (existingLink) existingLink.remove(); 
+        
         const isComplete = (data.batch_status === 'completed' || data.batch_status === 'completed_with_errors');
         const hasTasks = data.total_tasks > 0;
 
         if (isComplete && hasTasks) {
-             // Standard export link
-             const downloadLink = document.createElement('a');
-             downloadLink.href = `/export/${data.batch_id}`;
-             downloadLink.textContent = 'Download Output CSV';
-             downloadLink.classList.add('btn', 'btn-success', 'me-2');
-             exportArea.appendChild(downloadLink);
-
-             // Stages report link (conditional)
-             if (data.mode === 'THREE_STAGE') { 
-                 const stagesLink = document.createElement('a');
-                 stagesLink.href = `/export_stages/${data.batch_id}`;
-                 stagesLink.textContent = 'Download Stages Report';
-                 stagesLink.classList.add('btn', 'btn-info', 'me-2');
-                 exportArea.appendChild(stagesLink);
-             }
-             
              // Add View/Edit Results link
              const resultsLink = document.createElement('a');
              resultsLink.href = `/results/${data.batch_id}`;
              resultsLink.textContent = 'View/Edit Results';
-             resultsLink.classList.add('btn', 'btn-secondary');
-             exportArea.appendChild(resultsLink);
+             resultsLink.classList.add('btn', 'btn-secondary', 'mt-2', 'results-link'); // Added margin-top and class
+             actionArea.appendChild(resultsLink); // Append below the status alert
         }
     }
 
-    function setStatus(message, type = 'info') { // type: info, success, warning, danger
+    function setStatus(message, type = 'info') { 
         statusArea.innerHTML = `<div class="alert alert-${type}" role="alert">${message}</div>`;
     }
 

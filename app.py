@@ -310,18 +310,23 @@ def create_app():
         try:
             batch_info = db_manager.get_batch_info(db_path, batch_id)
             if not batch_info:
-                # Maybe render an error template?
                 return "Batch not found", 404 
             
-            # Fetch tasks as sqlite3.Row objects
+            # Parse batch config for use in template
+            batch_config = None
+            if batch_info['config_details']:
+                try: 
+                    batch_config = json.loads(batch_info['config_details'])
+                except json.JSONDecodeError:
+                    logger.warning(f"Could not parse config_details for batch {batch_id}")
+            
             tasks_raw = db_manager.get_tasks_for_review(db_path, batch_id)
-            logger.info(f"Found {len(tasks_raw)} raw tasks for batch {batch_id}")
-
-            # Convert to list of dictionaries for JSON serialization
             tasks_list = [dict(task) for task in tasks_raw]
 
-            # Pass the list of dicts to the template
-            return render_template('results.html', batch=batch_info, tasks=tasks_list)
+            return render_template('results.html', 
+                                   batch=batch_info, 
+                                   tasks=tasks_list, 
+                                   batch_config=batch_config) # Pass config too
 
         except Exception as e:
             logger.exception(f"Error fetching results for batch {batch_id}: {e}")

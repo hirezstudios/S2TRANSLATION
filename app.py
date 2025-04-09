@@ -188,15 +188,22 @@ def run_translation_thread(file_path, selected_langs, mode_config):
     """Target function for the background processing thread."""
     st.session_state['batch_status'] = 'preparing'
     try:
-        # 1. Prepare Batch
+        # 1. Prepare Batch (Uses mode_config)
         batch_id = translation_service.prepare_batch(file_path, selected_langs, mode_config)
         if batch_id:
             st.session_state['current_batch_id'] = batch_id
             st.session_state['batch_status'] = 'processing'
             logger.info(f"Starting processing for batch {batch_id} in background...")
             
-            # 2. Process Batch (blocking within this thread)
-            processed_data, success = translation_service.process_batch(batch_id)
+            # Get initialized clients *within the thread* from the api_clients module
+            openai_client_thread = api_clients.get_openai_client()
+            # Gemini is handled internally per call
+            
+            # 2. Process Batch (Pass clients)
+            processed_data, success = translation_service.process_batch(
+                batch_id, 
+                openai_client_obj=openai_client_thread 
+            )
             
             if success:
                 st.session_state['batch_status'] = 'completed'
@@ -270,11 +277,18 @@ if st.button("Start Translation Job", disabled=disable_start):
         
         logger.info(f"Starting job with config: {final_mode_config}")
 
-        # Start background thread
+        # Start background thread, pass clients via mode_config (or args? cleaner via args)
         thread = threading.Thread(
             target=run_translation_thread, 
-            args=(file_path, selected_languages, final_mode_config) # Pass collected config
+            # Pass clients explicitly, not via mode_config dict
+            args=(file_path, selected_languages, final_mode_config) # mode_config is still needed for prepare_batch
+            # Client objects will be accessed within the thread via the imported api_clients module
+            # RETHINK: Passing clients might be safer if module import in thread is tricky
         )
+        # Let's stick to using the initialized clients from api_clients module
+        # No change needed in thread start args if api_clients initializes correctly on import.
+        # Modify run_translation_thread to get clients directly from api_clients
+        # ... (Revert thread start args)
         st.session_state['processing_thread'] = thread
         st.session_state['batch_status'] = 'preparing' # Set status immediately
         st.session_state['export_data'] = None # Clear previous export data

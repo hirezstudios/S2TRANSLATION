@@ -245,27 +245,18 @@ def call_perplexity_api(system_prompt, user_content, row_identifier="N/A", model
             
     return None 
 
-def call_openai_api(system_prompt, user_content, row_identifier="N/A", model_override=None):
+def call_openai_api(openai_client_obj, system_prompt, user_content, row_identifier="N/A", model_override=None):
     """Calls the OpenAI Responses API for translation with retry logic and parses the output."""
-    if not openai_client:
-        with print_lock:
-             print(f"Error [Row {row_identifier}]: OpenAI client not initialized (check OPENAI_API_KEY).")
+    target_model = model_override if model_override else config.OPENAI_MODEL
+    # Use passed client object
+    if not openai_client_obj or not target_model:
+        with print_lock: logger.error(f"[OpenAI Row {row_identifier}]: Client object not provided or Model missing.")
         return None
-    if not OPENAI_MODEL:
-         with print_lock:
-             print(f"Error [Row {row_identifier}]: OPENAI_MODEL not found in .env file.")
-         return None
-
-    target_model = model_override if model_override else OPENAI_MODEL
-    if not target_model:
-         with print_lock:
-             print(f"Error [Row {row_identifier}]: No OpenAI model specified (default or override).")
-         return None
 
     current_retry_delay = API_INITIAL_RETRY_DELAY
     for attempt in range(API_MAX_RETRIES + 1):
         try:
-            response = openai_client.responses.create(
+            response = openai_client_obj.responses.create(
                 model=target_model,
                 input=user_content, # Direct string input for simple text
                 instructions=system_prompt,
@@ -443,12 +434,12 @@ def call_gemini_api(system_prompt, user_content, row_identifier="N/A", model_ove
 
 # --- Dispatcher --- 
 
-def call_active_api(target_api, system_prompt, user_content, row_identifier="N/A", model_override=None):
-    """Calls the specified target API."""
+def call_active_api(target_api, system_prompt, user_content, row_identifier="N/A", model_override=None, openai_client_obj=None):
+    """Calls the specified target API, passing necessary client."""
     if target_api == "PERPLEXITY":
         return call_perplexity_api(system_prompt, user_content, row_identifier, model_override)
     elif target_api == "OPENAI":
-        return call_openai_api(system_prompt, user_content, row_identifier, model_override)
+        return call_openai_api(openai_client_obj, system_prompt, user_content, row_identifier, model_override)
     elif target_api == "GEMINI":
         return call_gemini_api(system_prompt, user_content, row_identifier, model_override)
     else:
@@ -490,6 +481,7 @@ def translate_row_worker(task_data, worker_config):
     stage2_model_override = worker_config['stage2_model']
     stage3_model_override = worker_config['stage3_model']
     target_column_tpl = worker_config['target_column_tpl']
+    openai_client_obj = worker_config.get('openai_client')
 
     db_manager.update_task_status(db_path, task_id, 'running')
     
@@ -538,7 +530,8 @@ def translate_row_worker(task_data, worker_config):
             model_to_use = None 
             audit_record = {**audit_record_base, "api": api_to_use, "model": model_to_use or "default"} 
             final_translation = call_active_api(api_to_use, stage1_prompt, source_text, 
-                                                row_identifier=row_identifier, model_override=model_to_use)
+                                                row_identifier=row_identifier, model_override=model_to_use,
+                                                openai_client_obj=openai_client_obj)
             if final_translation is not None:
                 final_status = 'completed'
                 audit_record["final_translation"] = final_translation
@@ -555,7 +548,8 @@ def translate_row_worker(task_data, worker_config):
             s1_model = stage1_model_override 
             audit_record = {**audit_record_base, "stage1_api": s1_api, "stage1_model": s1_model or "default"}
             initial_translation = call_active_api(s1_api, stage1_prompt, source_text, 
-                                                row_identifier=f"{row_identifier}-S1", model_override=s1_model)
+                                                row_identifier=f"{row_identifier}-S1", model_override=s1_model,
+                                                openai_client_obj=openai_client_obj)
             audit_record["initial_translation"] = initial_translation
             db_manager.update_task_results(db_path, task_id, 'stage1_complete', initial_tx=initial_translation) 
 
@@ -574,7 +568,8 @@ def translate_row_worker(task_data, worker_config):
                 stage2_prompt = prompt_manager.get_full_prompt(stage=2, lang_code=lang_code, source_text=source_text, initial_translation=initial_translation)
                 eval_user_content = "Evaluate the provided translation based on the rules and context."
                 evaluation_raw = call_active_api(s2_api, stage2_prompt, eval_user_content, 
-                                           row_identifier=f"{row_identifier}-S2", model_override=s2_model)
+                                           row_identifier=f"{row_identifier}-S2", model_override=s2_model,
+                                           openai_client_obj=openai_client_obj)
                 
                 evaluation_score = None
                 evaluation_feedback = None
@@ -629,7 +624,8 @@ def translate_row_worker(task_data, worker_config):
                     stage3_prompt = prompt_manager.get_full_prompt(stage=3, lang_code=lang_code, source_text=source_text, initial_translation=initial_translation, feedback=evaluation_feedback)
                     refine_user_content = "Revise the translation based on the provided context and feedback."
                     final_translation = call_active_api(s3_api, stage3_prompt, refine_user_content, 
-                                                      row_identifier=f"{row_identifier}-S3", model_override=s3_model)
+                                                      row_identifier=f"{row_identifier}-S3", model_override=s3_model,
+                                                      openai_client_obj=openai_client_obj)
                     audit_record["final_translation"] = final_translation
                     
                     if final_translation is None or final_translation.startswith("ERROR:BLOCKED:"):
@@ -665,7 +661,7 @@ def translate_row_worker(task_data, worker_config):
     return task_data_copy 
 
 # --- Batch Processing --- 
-def process_batch(batch_id):
+def process_batch(batch_id, openai_client_obj=None):
     """Processes all pending tasks for a given batch_id using thread pool."""
     logger.info(f"Starting processing for batch_id: {batch_id}")
     db_path = config.DATABASE_FILE # Get DB path once
@@ -695,7 +691,7 @@ def process_batch(batch_id):
     success_count = 0
     error_count = 0
     
-    # Prepare worker_config based on the *stored batch config*
+    # Prepare worker_config including clients
     worker_config = {
         'db_path': db_path,
         'translation_mode': batch_config.get('mode', 'ONE_STAGE'),
@@ -706,7 +702,8 @@ def process_batch(batch_id):
         'stage1_model': batch_config.get('s1_model'), # Overrides passed directly
         'stage2_model': batch_config.get('s2_model'),
         'stage3_model': batch_config.get('s3_model'),
-        'target_column_tpl': config.TARGET_COLUMN_TPL # Still from general config
+        'target_column_tpl': config.TARGET_COLUMN_TPL, # Still from general config
+        'openai_client': openai_client_obj,
     }
     
     processed_task_results = {} 

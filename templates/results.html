@@ -53,26 +53,46 @@
 
         // Initialize Tabulator
         const table = new Tabulator("#results-table", {
-            data: taskData,           // Load data retrieved from Flask
-            layout: "fitDataTable",   // Adjust columns to fit data
-            pagination: "local",      // Enable local pagination
-            paginationSize: 50,       // Show 50 rows per page
-            paginationSizeSelector: [10, 50, 100, 500, true], // Page size options
+            data: taskData,           
+            layout: "fitDataTable",   // fitDataTable tries to fit columns, might need adjustment if wrapping fails
+            // layout: "fitData", // Alternative: adjusts height to fit data
+            pagination: "local",      
+            paginationSize: 50,       
+            paginationSizeSelector: [10, 50, 100, 500, true], 
             columns: [
-                { title: "#", field: "row_index_in_file", formatter: "rownum", hozAlign: "center", width: 60, frozen:true },
-                { title: "ID", field: "task_id", width: 70, visible: false }, // Hidden but useful
-                { title: "Lang", field: "language_code", width: 70, headerFilter: "input", frozen:true },
-                { title: "Source Text", field: "source_text", headerFilter: "input", tooltip: true, widthGrow:2, formatter: "textarea" },
-                { title: "LLM Final", field: "final_translation", headerFilter: "input", tooltip: true, widthGrow:3, formatter: "textarea" },
+                { title: "#", field: "row_index_in_file", formatter: "rownum", hozAlign: "center", width: 60, frozen:true, resizable:false },
+                { title: "ID", field: "task_id", width: 70, visible: false }, 
+                { title: "Lang", field: "language_code", width: 70, headerFilter: "input", frozen:true, resizable:false },
+                { 
+                    title: "Source Text", 
+                    field: "source_text", 
+                    headerFilter: "input", 
+                    headerFilterPlaceholder:"Filter Source...", 
+                    tooltip: true, 
+                    widthGrow:2, 
+                    formatter: "textarea" // Use textarea formatter for wrapping
+                },
+                { 
+                    title: "LLM Final", 
+                    field: "final_translation", 
+                    headerFilter: "input", 
+                    headerFilterPlaceholder:"Filter LLM Output...", 
+                    tooltip: true, 
+                    widthGrow:3, 
+                    formatter: "textarea" // Use textarea formatter for wrapping
+                },
                 {
                     title: "Approved Translation",
                     field: "approved_translation",
                     headerFilter: "input",
+                    headerFilterPlaceholder:"Filter Approved...",
                     tooltip: true,
                     widthGrow: 3,
-                    editor: "textarea", // Enable editing
+                    editor: "textarea", 
+                    formatter: "textarea", // Use textarea formatter for wrapping
                     editorParams: {
-                         verticalNavigation: "hybrid", // Allow shift+enter for newlines
+                         verticalNavigation: "hybrid",
+                         elementAttributes:{ maxLength:"5000" } // Limit input length slightly
                     },
                     cellEdited: function(cell){
                         // Triggered after a cell is edited and loses focus/Enter pressed
@@ -81,9 +101,27 @@
                         handleReview(taskId, 'approved_edited', newValue);
                     }
                 },
-                { title: "Review Status", field: "review_status", width: 160, hozAlign: "center", formatter: statusFormatter, headerFilter: "select", headerFilterParams:{values:["pending_review", "approved_original", "approved_edited", "denied", true]} },
-                { title: "Actions", formatter: actionFormatter, hozAlign: "center", width: 200, headerSort: false }
+                { 
+                    title: "Review Status", 
+                    field: "review_status", 
+                    width: 160, hozAlign: "center", 
+                    formatter: statusFormatter, 
+                    headerFilter: "select", 
+                    headerFilterParams:{values:["", "pending_review", "approved_original", "approved_edited", "denied"], sortValuesList: "asc"}, // Added empty option
+                    headerFilterPlaceholder: "Filter Status..."
+                },
+                { 
+                    title: "Actions", 
+                    formatter: actionFormatter, 
+                    hozAlign: "center", 
+                    width: 200, 
+                    headerSort: false, 
+                    resizable: false
+                }
             ],
+            initialSort:[ // Optional: Initial sort
+                {column:"row_index_in_file", dir:"asc"}, 
+            ]
         });
 
         // Function to handle review actions (Approve Original / Deny / Save Edit)

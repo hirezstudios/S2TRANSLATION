@@ -759,47 +759,70 @@ def process_batch(batch_id):
     reconstructed_data_list = [reconstructed_data_dict[idx] for idx in sorted(reconstructed_data_dict.keys())]
     return reconstructed_data_list, error_count == 0
 
-# ... (Input Processing - unchanged) ...
-# ... (Export - unchanged, now receives data from process_batch) ...
-# ... (Main execution - calls process_batch, passes data to export) ...
+# --- Input Processing --- 
+def prepare_batch(input_file_path, selected_languages):
+    """Parses input CSV, creates DB entries for a new batch and tasks."""
+    db_path = config.DATABASE_FILE # Get DB path
+    batch_id = str(uuid.uuid4())
+    filename = os.path.basename(input_file_path)
+    logger.info(f"Preparing batch {batch_id} from file: {filename}")
+    
+    # Store config snapshot 
+    config_snapshot = json.dumps({
+        "mode": config.TRANSLATION_MODE,
+        "languages": selected_languages,
+        "default_api": config.DEFAULT_API,
+        "s1_api": config.STAGE1_API, "s1_model": config.STAGE1_MODEL_OVERRIDE,
+        "s2_api": config.STAGE2_API, "s2_model": config.STAGE2_MODEL_OVERRIDE,
+        "s3_api": config.STAGE3_API, "s3_model": config.STAGE3_MODEL_OVERRIDE,
+    })
+    db_manager.add_batch(db_path, batch_id, filename, config_snapshot)
 
-def translate_csv(input_file, output_file):
-    """DEPRECATED / Example: Reads input CSV, prepares batch, processes, exports."""
-    # This function structure is more suitable for direct script execution.
-    # For Streamlit, app.py will call prepare_batch and process_batch separately.
-    logger.warning("translate_csv function is deprecated for direct use, use prepare_batch and process_batch.")
-    
-    logger.info("Running translation service directly (Example Usage - Phase 1)")
-    
-    # Determine available languages based on config AND loaded prompts
-    available_and_prompted_langs = [lang for lang in config.AVAILABLE_LANGUAGES if lang in prompt_manager.stage1_templates]
-    
-    if not available_and_prompted_langs:
-        logger.error("No languages available to translate (check AVAILABLE_LANGUAGES in .env and prompt file existence).")
-        return # Exit function
+    tasks_added = 0
+    target_columns_in_file = set() 
+    try:
+        with open(input_file_path, 'r', encoding='utf-8') as infile:
+            reader = csv.DictReader(infile)
+            fieldnames = reader.fieldnames or []
+            if config.SOURCE_COLUMN not in fieldnames:
+                logger.error(f"Source column '{config.SOURCE_COLUMN}' not found in {filename}")
+                db_manager.update_batch_status(db_path, batch_id, 'failed')
+                return None
+            
+            target_columns_in_file = {f for f in fieldnames if f.startswith("tg_")}
+            metadata_columns = [f for f in fieldnames if not f.startswith("tg_") and f != config.SOURCE_COLUMN]
+
+            for i, row in enumerate(reader):
+                source_text = row.get(config.SOURCE_COLUMN, "").strip()
+                metadata = {col: row.get(col, "") for col in metadata_columns} 
+                metadata_json = json.dumps(metadata)
+                
+                for lang_code in selected_languages:
+                    target_col_name = config.TARGET_COLUMN_TPL.format(lang_code=lang_code)
+                    # Check if language is generally available AND target column exists
+                    if lang_code in prompt_manager.stage1_templates and target_col_name in target_columns_in_file:
+                         db_manager.add_translation_task(db_path, batch_id, i, lang_code, source_text, metadata_json)
+                         tasks_added += 1
+                    elif lang_code not in prompt_manager.stage1_templates:
+                         logger.warning(f"Skipping language {lang_code} for row {i}: Lang code not available (missing prompt file?).")
+                    # else: column not present, skip silently or log?
+                        
+    except Exception as e:
+        logger.exception(f"Error processing input file {filename} for batch {batch_id}: {e}")
+        db_manager.update_batch_status(db_path, batch_id, 'failed')
+        return None
+
+    if tasks_added == 0:
+        logger.warning(f"No tasks added for batch {batch_id}. Check selected languages and input file columns/prompt files.")
+        db_manager.update_batch_status(db_path, batch_id, 'completed_empty')
+        return None 
         
-    logger.info(f"Selected languages for processing: {available_and_prompted_langs}")
+    logger.info(f"Added {tasks_added} tasks for batch {batch_id}.")
+    db_manager.update_batch_status(db_path, batch_id, 'pending') # Mark as pending, ready for processing
+    return batch_id
 
-    # 1. Prepare Batch (Parse input, populate DB)
-    batch_id = prepare_batch(input_file, available_and_prompted_langs)
-
-    if batch_id:
-        # 2. Process Batch (Run translations)
-        processed_data, success = process_batch(batch_id)
-        
-        # 3. Generate Export (if successful)
-        if processed_data: # Check if we got data back
-             # Construct output path based on input filename and config
-             output_filename = f"output_{os.path.splitext(os.path.basename(input_file))[0]}_{config.DEFAULT_API.lower()}_batch_{batch_id[:8]}.csv"
-             output_path = os.path.join(config.OUTPUT_DIR, output_filename)
-             generate_export(batch_id, output_path, processed_data=processed_data) 
-             print(f"Processing complete. Check DB ({config.DATABASE_FILE}) and audit log ({config.AUDIT_LOG_FILE})")
-             print(f"Main output attempt saved to: {output_path}")
-        else:
-             print(f"Processing completed but no data returned for export. Errors may have occurred for batch {batch_id}. Check logs and DB.")
-    else:
-        print("Batch preparation failed.")
-
+# --- Export --- #
+# ... (generate_export function) ...
 
 # --- Main execution (Example CLI usage) --- #
 if __name__ == "__main__":

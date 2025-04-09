@@ -493,9 +493,9 @@ def translate_row_worker(task_data, worker_config):
     evaluation_score_local = None
     evaluation_feedback_local = None
     error_message_local = None
-    final_status = 'error' 
     approved_translation_local = None 
-    review_status_local = 'pending_review' # Default review status if things go wrong early
+    review_status_local = 'pending_review' # Default if error happens before completion
+    final_status = 'error' # Default task execution status
     
     audit_record_base = {"task_id": task_id, "row_index": task_data['row_index_in_file'] + 1, "language": lang_code, "mode": worker_config['translation_mode']}
 
@@ -506,7 +506,10 @@ def translate_row_worker(task_data, worker_config):
         approved_translation_local = "" # Empty approved for empty source
         review_status_local = 'approved_original' # Auto-approve empty source?
         audit_record = {**audit_record_base, "error": error_message_local, "final_translation": "", "approved_translation": approved_translation_local, "review_status": review_status_local}
-        db_manager.update_task_results(db_path, task_id, final_status, final_tx="", approved_tx=approved_translation_local, review_sts=review_status_local, error_msg=error_message_local)
+        db_manager.update_task_results(db_path, task_id, final_status, 
+                                       initial_tx=None, score=None, feedback=None, 
+                                       final_tx="", approved_tx=approved_translation_local, 
+                                       review_sts=review_status_local, error_msg=error_message_local)
         log_audit_record(audit_record)
         return True # Indicate success (completed handling empty source)
         
@@ -655,16 +658,15 @@ def translate_row_worker(task_data, worker_config):
         final_status = 'error' 
 
     # Final DB Update 
-    # Update with all collected local results for this task
+    # Use the final determined local values
     db_manager.update_task_results(
         db_path, task_id, final_status, 
         initial_translation_local, evaluation_score_local, evaluation_feedback_local, 
-        final_translation_local, approved_translation_local, # Pass approved_translation
-        review_status_local, # Pass review_status
+        final_translation_local, approved_translation_local, 
+        review_status_local, 
         error_message_local
     )
     
-    # Return simple status for thread pool progress tracking
     return final_status == 'completed' 
 
 # --- Background Batch Processing Function (Target for Flask's Thread) ---

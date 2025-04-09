@@ -16,46 +16,139 @@
     <!-- TODO: Add filters for language / review_status -->
 
     {% if tasks %}
-    <div class="table-responsive">
-        <table class="table table-striped table-bordered table-sm">
-            <thead>
-                <tr>
-                    <th>#</th>
-                    <th>Lang</th>
-                    <th>Source Text</th>
-                    <th>LLM Translation</th>
-                    <th>Approved Translation</th>
-                    <th>Review Status</th>
-                    <th>Actions</th> <!-- Placeholder for edit/approve buttons -->
-                </tr>
-            </thead>
-            <tbody>
-                {% for task in tasks %}
-                <tr>
-                    <td>{{ task['row_index_in_file'] + 1 }}</td>
-                    <td>{{ task['language_code'] }}</td>
-                    <td>{{ task['source_text'] }}</td>
-                    <td>{{ task['final_translation'] }}</td>
-                    <td>{{ task['approved_translation'] or '' }}</td> {# Display approved, empty if None #}
-                    <td>
-                        <span class="badge bg-{% if task['review_status'] == 'pending_review' %}warning{% elif task['review_status'].startswith('approved') %}success{% elif task['review_status'] == 'denied' %}danger{% else %}secondary{% endif %}">
-                            {{ task['review_status'] }}
-                        </span>
-                    </td>
-                    <td>
-                        <!-- Action buttons will go here -->
-                    </td>
-                </tr>
-                {% endfor %}
-            </tbody>
-        </table>
-    </div>
+        <!-- Container for Tabulator table -->
+        <div id="results-table"></div>
     {% else %}
-    <p class="text-warning">No translation tasks found for this batch.</p>
+        <p class="text-warning">No translation tasks found for this batch.</p>
     {% endif %}
 
 {% endblock %}
 
 {% block scripts %}
-    <!-- Add JS for filtering/editing later -->
+    <script>
+        // Pass Flask data to JavaScript
+        const taskData = {{ tasks|tojson }};
+        console.log("Task data received:", taskData);
+
+        // Custom formatter for review status badges
+        const statusFormatter = function(cell, formatterParams, onRendered){
+            const status = cell.getValue();
+            let bgColor = 'secondary';
+            if (status === 'pending_review') bgColor = 'warning';
+            else if (status && status.startsWith('approved')) bgColor = 'success';
+            else if (status === 'denied') bgColor = 'danger';
+            return `<span class="badge bg-${bgColor}">${status}</span>`;
+        };
+
+        // Custom formatter for action buttons
+        const actionFormatter = function(cell, formatterParams, onRendered){
+            const taskId = cell.getRow().getData().task_id;
+            const buttons = `
+                <button class="btn btn-sm btn-outline-success me-1" onclick="handleReview(${taskId}, 'approved_original')">Approve Original</button>
+                <button class="btn btn-sm btn-outline-danger" onclick="handleReview(${taskId}, 'denied')">Deny</button>
+            `;
+            // Approve Edited is handled by cell edit callback
+            return buttons;
+        };
+
+        // Initialize Tabulator
+        const table = new Tabulator("#results-table", {
+            data: taskData,           // Load data retrieved from Flask
+            layout: "fitDataTable",   // Adjust columns to fit data
+            pagination: "local",      // Enable local pagination
+            paginationSize: 50,       // Show 50 rows per page
+            paginationSizeSelector: [10, 50, 100, 500, true], // Page size options
+            columns: [
+                { title: "#", field: "row_index_in_file", formatter: "rownum", hozAlign: "center", width: 60, frozen:true },
+                { title: "ID", field: "task_id", width: 70, visible: false }, // Hidden but useful
+                { title: "Lang", field: "language_code", width: 70, headerFilter: "input", frozen:true },
+                { title: "Source Text", field: "source_text", headerFilter: "input", tooltip: true, widthGrow:2, formatter: "textarea" },
+                { title: "LLM Final", field: "final_translation", headerFilter: "input", tooltip: true, widthGrow:3, formatter: "textarea" },
+                {
+                    title: "Approved Translation",
+                    field: "approved_translation",
+                    headerFilter: "input",
+                    tooltip: true,
+                    widthGrow: 3,
+                    editor: "textarea", // Enable editing
+                    editorParams: {
+                         verticalNavigation: "hybrid", // Allow shift+enter for newlines
+                    },
+                    cellEdited: function(cell){
+                        // Triggered after a cell is edited and loses focus/Enter pressed
+                        const taskId = cell.getRow().getData().task_id;
+                        const newValue = cell.getValue();
+                        handleReview(taskId, 'approved_edited', newValue);
+                    }
+                },
+                { title: "Review Status", field: "review_status", width: 160, hozAlign: "center", formatter: statusFormatter, headerFilter: "select", headerFilterParams:{values:["pending_review", "approved_original", "approved_edited", "denied", true]} },
+                { title: "Actions", formatter: actionFormatter, hozAlign: "center", width: 200, headerSort: false }
+            ],
+        });
+
+        // Function to handle review actions (Approve Original / Deny / Save Edit)
+        window.handleReview = async function(taskId, status, approvedText = null) {
+            console.log(`Handling review for task ${taskId}: status=${status}`);
+            let payload = { 
+                review_status: status, // Send review_status in payload
+                approved_translation: approvedText 
+            };
+            
+            const row = table.getRow(taskId); // Get row using task_id
+            if (!row) {
+                 console.error("Could not find row data for task ID:", taskId);
+                 alert("Error: Could not find row data in table.");
+                 return;
+            }
+
+            // If approving original, get the LLM final text from the row data
+            if (status === 'approved_original') {
+                payload.approved_translation = row.getData().final_translation;
+            } else if (status === 'approved_edited') {
+                 // Text comes directly from the cellEdited callback or input
+                 if (approvedText === null) {
+                     // This case should ideally not happen if triggered by cellEdited
+                     console.error("Approved_edited status without new text value.");
+                     // Re-fetch from cell as fallback?
+                     const cell = row.getCell("approved_translation"); 
+                     if(cell) payload.approved_translation = cell.getValue();
+                     else { 
+                         alert("Error: Could not get edited value from cell."); 
+                         return; 
+                     }
+                 }
+            } else if (status === 'denied') {
+                 payload.approved_translation = null; // Explicitly set to null for denied
+            }
+
+            console.log("Sending payload:", payload);
+
+            try {
+                const response = await fetch(`/review_task/${taskId}`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload)
+                });
+                const data = await response.json(); // Always try to parse JSON
+                
+                if (response.ok) {
+                    console.log("Review update successful:", data);
+                    // Update table data visually 
+                    row.update({
+                         review_status: status, 
+                         approved_translation: payload.approved_translation
+                    });                   
+                    // TODO: Show success toast message
+                } else {
+                    console.error("Review update failed:", data);
+                    alert(`Error updating review: ${data.error || response.statusText}`);
+                    // Optionally revert cell change if edit failed?
+                }
+            } catch (error) {
+                console.error('Network error updating review:', error);
+                alert(`Network error updating review: ${error}`);
+            }
+        }
+
+    </script>
 {% endblock %} 

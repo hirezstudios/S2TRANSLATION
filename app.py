@@ -204,12 +204,8 @@ def run_translation_thread(file_path, selected_langs, mode_config):
         if batch_id_local:
             st.session_state['current_batch_id'] = batch_id_local
             st.session_state['batch_status'] = 'processing' # Update status
-            logger.info(f"Prepare batch SUCCESS. Batch ID: {batch_id_local}. Status -> processing. Triggering rerun.")
-            try:
-                 st.rerun() # Rerun to show 'processing' status
-            except Exception as rerun_err:
-                 logger.warning(f"Ignoring error during first st.rerun in thread: {rerun_err}")
-                 # Continue processing even if rerun fails here
+            logger.info(f"Prepare batch SUCCESS. Batch ID: {batch_id_local}. Status -> processing.")
+            # NO RERUN HERE
 
             # Get initialized clients *within the thread* from the api_clients module
             openai_client_thread = api_clients.get_openai_client()
@@ -251,13 +247,8 @@ def run_translation_thread(file_path, selected_langs, mode_config):
             except Exception as db_e:
                 logger.error(f"Failed to update batch status to failed in DB: {db_e}")
     finally:
-        logger.info("Background thread finished. Triggering final rerun.")
-        # Trigger final UI update regardless of success/failure
-        try:
-            st.rerun()
-        except Exception as rerun_err:
-            logger.warning(f"Ignoring error during final st.rerun in thread: {rerun_err}")
-        # Thread completes here
+        logger.info("Background thread finished.")
+        # NO FINAL RERUN HERE - Main thread handles UI updates via polling
 
 # --- Callback Function --- #
 def start_translation_job_callback():
@@ -334,19 +325,27 @@ st.button(
 
 # --- Status Display & Refresh Loop --- #
 
+current_status = st.session_state.get('batch_status', 'idle')
+
 # Display Status / Progress (includes spinners)
-if st.session_state['batch_status'] == 'preparing':
+if current_status == 'preparing':
     st.info(f"Preparing batch...") 
     with st.spinner("Preparing..."): pass
-elif st.session_state['batch_status'] == 'processing':
+elif current_status == 'processing':
     st.info(f"Processing Batch ID: {st.session_state.get('current_batch_id', 'N/A')}...") 
     with st.spinner("Translating..."): pass 
-elif st.session_state['batch_status'] == 'completed':
+elif current_status == 'completed':
     st.success(f"Batch {st.session_state.get('current_batch_id', 'N/A')} completed successfully!")
-elif st.session_state['batch_status'] == 'completed_with_errors':
+elif current_status == 'completed_with_errors':
     st.warning(f"Batch {st.session_state.get('current_batch_id', 'N/A')} completed with errors. Check logs and Audit file.")
-elif st.session_state['batch_status'] == 'failed':
+elif current_status == 'failed':
     st.error(f"Batch {st.session_state.get('current_batch_id', 'N/A')} preparation or processing failed. Check logs.")
+
+# Refresh Loop: If preparing or processing, wait and rerun
+if current_status in ['preparing', 'processing']:
+    logger.debug(f"Current status is {current_status}, sleeping and rerunning...")
+    time.sleep(2) # Wait a couple of seconds before refresh
+    st.rerun()
 
 # --- Export --- #
 st.header("3. Export Results")

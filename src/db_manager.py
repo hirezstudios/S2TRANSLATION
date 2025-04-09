@@ -73,27 +73,53 @@ def initialize_database(db_file_path):
         logger.info("Base table 'TranslationTasks' checked/created.")
 
         # Add new columns if they don't exist
-        for col_name, col_type in schema_updates.items():
+        needs_default_update = []
+        for col_name, col_def in schema_updates.items():
             if col_name not in existing_columns:
+                # Separate base type from constraints for ALTER TABLE
+                col_type_for_add = col_def.split()[0] # e.g., TEXT, DATETIME, INTEGER
+                default_value = None
+                is_not_null = False
+                
+                if "NOT NULL" in col_def.upper(): is_not_null = True
+                if "DEFAULT" in col_def.upper():
+                    # Extract default value (handle quotes for strings)
+                    default_part = col_def.upper().split("DEFAULT")[1].strip()
+                    if default_part.startswith("'"):
+                        default_value = default_part.strip("'")
+                    elif default_part.startswith("\""):
+                         default_value = default_part.strip('\"')
+                    else: # Assume numeric or keyword like CURRENT_TIMESTAMP
+                         default_value = default_part 
+                    needs_default_update.append((col_name, default_value))
+                
                 try:
-                    # Use simplified ALTER TABLE ADD COLUMN
-                    add_column_sql = f"ALTER TABLE TranslationTasks ADD COLUMN {col_name} {col_type}"
-                    # Handle default value separately if needed for existing rows (though default is on create)
-                    if 'DEFAULT' in col_type:
-                        # SQLite requires separate step for default on existing rows usually
-                        # For simplicity, let default only apply to new rows for now.
-                        add_column_sql = f"ALTER TABLE TranslationTasks ADD COLUMN {col_name} {col_type.split('DEFAULT')[0].strip()}"
-                        # TODO: Optionally add an UPDATE statement here if needed
-                    
+                    add_column_sql = f"ALTER TABLE TranslationTasks ADD COLUMN {col_name} {col_type_for_add}"
                     cursor.execute(add_column_sql)
                     logger.info(f"Added column '{col_name}' to TranslationTasks.")
+                    
+                    # Add NOT NULL constraint separately if needed (Requires newer SQLite? Check docs)
+                    # For simplicity, let's omit adding NOT NULL via ALTER for now
+                    # if is_not_null:
+                    #    logger.warning(f"NOT NULL constraint for {col_name} not added via ALTER TABLE.")
+
                 except sqlite3.OperationalError as e:
-                    # Ignore error if column already exists (might happen in race conditions or reruns)
                     if "duplicate column name" in str(e):
                         logger.warning(f"Column '{col_name}' already exists.")
-                    else:
-                        raise e # Re-raise other operational errors
+                    else: raise e 
         
+        # Update default values for newly added columns on existing rows
+        for col_name, default_val in needs_default_update:
+             if default_val is not None and default_val != 'CURRENT_TIMESTAMP': # Cannot set CURRENT_TIMESTAMP this way
+                 logger.info(f"Updating existing rows with default for {col_name}...")
+                 # Use parameterized query
+                 update_sql = f"UPDATE TranslationTasks SET {col_name} = ? WHERE {col_name} IS NULL"
+                 cursor.execute(update_sql, (default_val,))
+             elif default_val == 'CURRENT_TIMESTAMP':
+                  logger.info(f"Updating existing rows with CURRENT_TIMESTAMP for {col_name}...")
+                  update_sql = f"UPDATE TranslationTasks SET {col_name} = CURRENT_TIMESTAMP WHERE {col_name} IS NULL"
+                  cursor.execute(update_sql)
+
         # Add index for faster lookups
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_task_batch_status ON TranslationTasks (batch_id, status)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_task_batch_lang ON TranslationTasks (batch_id, language_code)")

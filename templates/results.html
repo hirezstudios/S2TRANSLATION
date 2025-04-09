@@ -1,0 +1,61 @@
+{% extends 'base.html' %}
+
+{% block title %}Results for Batch {{ batch['batch_id'][:8] }}{% endblock %}
+
+{% block content %}
+    <nav aria-label="breadcrumb">
+        <ol class="breadcrumb">
+            <li class="breadcrumb-item"><a href="{{ url_for('index') }}">Home</a></li>
+            <li class="breadcrumb-item active" aria-current="page">Batch Results</li>
+        </ol>
+    </nav>
+
+    <h2>Results for Batch: <small class="text-muted">{{ batch['batch_id'] }}</small></h2>
+    <p><strong>File:</strong> {{ batch['upload_filename'] }}</p>
+    <p><strong>Status:</strong> {{ batch['status'] }}</p>
+    <!-- TODO: Add filters for language / review_status -->
+
+    {% if tasks %}
+    <div class="table-responsive">
+        <table class="table table-striped table-bordered table-sm">
+            <thead>
+                <tr>
+                    <th>#</th>
+                    <th>Lang</th>
+                    <th>Source Text</th>
+                    <th>LLM Translation</th>
+                    <th>Approved Translation</th>
+                    <th>Review Status</th>
+                    <th>Actions</th> <!-- Placeholder for edit/approve buttons -->
+                </tr>
+            </thead>
+            <tbody>
+                {% for task in tasks %}
+                <tr>
+                    <td>{{ task['row_index_in_file'] + 1 }}</td>
+                    <td>{{ task['language_code'] }}</td>
+                    <td>{{ task['source_text'] }}</td>
+                    <td>{{ task['final_translation'] }}</td>
+                    <td>{{ task['approved_translation'] or '' }}</td> {# Display approved, empty if None #}
+                    <td>
+                        <span class="badge bg-{% if task['review_status'] == 'pending_review' %}warning{% elif task['review_status'].startswith('approved') %}success{% elif task['review_status'] == 'denied' %}danger{% else %}secondary{% endif %}">
+                            {{ task['review_status'] }}
+                        </span>
+                    </td>
+                    <td>
+                        <!-- Action buttons will go here -->
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    {% else %}
+    <p class="text-warning">No translation tasks found for this batch.</p>
+    {% endif %}
+
+{% endblock %}
+
+{% block scripts %}
+    <!-- Add JS for filtering/editing later -->
+{% endblock %} 

@@ -302,7 +302,29 @@ def create_app():
             logger.exception(f"Error during stages report export for batch {batch_id}: {e}")
             return jsonify({"error": "An unexpected error occurred during stages report export."}), 500
             
-    # Placeholder for other routes: /results, /rules
+    @app.route('/results/<batch_id>')
+    def view_results(batch_id):
+        """Displays the results of a translation batch for review."""
+        logger.info(f"Received request to view results for batch {batch_id}")
+        db_path = config.DATABASE_FILE
+        try:
+            batch_info = db_manager.get_batch_info(db_path, batch_id)
+            if not batch_info:
+                # Maybe render an error template?
+                return "Batch not found", 404 
+            
+            # Fetch all tasks for this batch for display
+            tasks = db_manager.get_tasks_for_review(db_path, batch_id)
+            logger.info(f"Found {len(tasks)} tasks for batch {batch_id}")
+
+            return render_template('results.html', batch=batch_info, tasks=tasks)
+
+        except Exception as e:
+            logger.exception(f"Error fetching results for batch {batch_id}: {e}")
+            # Render an error page?
+            return "An error occurred while fetching results.", 500
+
+    # Placeholder for other routes: /rules
     @app.route('/placeholder')
     def placeholder():
         return "Route not implemented yet."

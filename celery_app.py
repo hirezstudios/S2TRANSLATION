@@ -17,8 +17,8 @@ logger.info(f"BACKEND URL FROM CONFIG: '{config.CELERY_RESULT_BACKEND}'")
 # The include argument tells Celery where to find task modules
 celery = Celery(
     'translation_tasks', 
-    broker=config.CELERY_BROKER_URL,
-    backend=config.CELERY_RESULT_BACKEND, # Optional: for storing task results
+    broker=config.CELERY_BROKER_URL, # Keep reading broker from config
+    backend="redis://localhost:6379/0", # HARDCODE backend URL for testing
     include=['src.tasks'] # Point to the tasks module within the src package
 )
 

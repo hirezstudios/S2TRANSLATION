@@ -654,8 +654,22 @@ def translate_row_worker(task_data, worker_config):
         logger.exception(f"Critical Error in worker for task {task_id} (Row {row_identifier}): {e}")
         error_message_local = f"Critical worker error: {e}"
         log_audit_record({**audit_record_base, "error": error_message_local})
-        final_translation_local = ""
+        final_translation_local = "" 
+        approved_translation_local = None 
+        review_status_local = 'error' 
         final_status = 'error' 
+
+    # --- Set default approved/review status based on final execution status --- #
+    if final_status == 'completed':
+        if approved_translation_local is None: # If not already set by a fallback path
+             approved_translation_local = final_translation_local
+        if review_status_local == 'pending_review': # If not already set by fallback path
+             review_status_local = 'approved_original'
+    elif final_status == 'error':
+        # Ensure these are None/pending on error if not already set by exception block
+        approved_translation_local = None
+        review_status_local = 'pending_review' # Or 'error'? Let's stick to pending for review.
+    # --- End Default Setting --- #
 
     # Final DB Update 
     # Use the final determined local values

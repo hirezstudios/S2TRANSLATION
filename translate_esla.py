@@ -2,6 +2,9 @@ import os
 import csv
 import requests
 import openai # Added
+import google.generativeai as genai # Added
+from google.generativeai.types import HarmCategory, HarmBlockThreshold # Added for safety settings
+from google.api_core import exceptions as google_exceptions # Added for Gemini exceptions
 from dotenv import load_dotenv
 import time
 import re 
@@ -29,6 +32,12 @@ OPENAI_MODEL = os.getenv("OPENAI_MODEL")
 openai_client = None
 if ACTIVE_API == "OPENAI" and OPENAI_API_KEY:
     openai_client = openai.OpenAI(api_key=OPENAI_API_KEY)
+
+# Gemini Settings
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+GEMINI_MODEL = os.getenv("GEMINI_MODEL")
+# Configure Gemini client later if needed
+
 # --- End API Configuration ---
 
 # --- CSV Configuration ---
@@ -233,6 +242,103 @@ def call_openai_api(system_prompt, user_content, row_identifier="N/A"):
 
     return None
 
+def call_gemini_api(system_prompt, user_content, row_identifier="N/A"):
+    """Calls the Gemini API for translation with retry logic and parses the output."""
+    # Check if client is configured (should be done in main)
+    if not GEMINI_MODEL:
+         with print_lock:
+             print(f"Error [Row {row_identifier}]: GEMINI_MODEL not found in .env file.")
+         return None
+         
+    # Configure generation settings
+    generation_config = genai.GenerationConfig(
+        temperature=0.2,
+        # max_output_tokens=1024, # Adjust as needed
+        response_mime_type="text/plain",
+    )
+    # Configure safety settings (adjust thresholds as needed)
+    safety_settings = {
+        HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE,
+        HarmCategory.HARM_CATEGORY_HATE_SPEECH: HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE,
+        HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT: HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE,
+        HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE,
+    }
+
+    # Create the model instance within the function for thread safety
+    try:
+        model = genai.GenerativeModel(
+            model_name=GEMINI_MODEL,
+            system_instruction=system_prompt,
+            generation_config=generation_config,
+            safety_settings=safety_settings
+        )
+    except Exception as e:
+        with print_lock:
+            print(f"Error [Gemini Row {row_identifier}]: Failed to initialize Gemini model - {e}")
+        return None
+
+    current_retry_delay = API_INITIAL_RETRY_DELAY
+    for attempt in range(API_MAX_RETRIES + 1):
+        try:
+            # Use generate_content (non-streaming)
+            response = model.generate_content(user_content)
+
+            # Extract text - check response structure carefully
+            # Assuming response.text holds the direct translation based on mime_type
+            if hasattr(response, 'text'):
+                 translation = response.text.strip()
+                 if translation:
+                     # Gemini might still include instructions or noise, add parsing if needed
+                     return translation
+                 else:
+                     with print_lock:
+                         print(f"Warning [Gemini Row {row_identifier}]: Translation result empty.")
+                     # Check for blocked content due to safety settings
+                     if response.prompt_feedback.block_reason:
+                         print(f"--> Blocked Reason: {response.prompt_feedback.block_reason}")
+                     return ""
+            else:
+                 # Handle cases where text is not directly available or response structure is different
+                 # Check response.parts or other attributes
+                 with print_lock:
+                     print(f"Warning [Gemini Row {row_identifier}]: Unexpected Gemini response structure (no .text attribute).")
+                     # print(response) # Optional: log full response
+                 return "" 
+        
+        # --- Gemini Specific Retry Logic --- 
+        except google_exceptions.ResourceExhausted as e: # Likely rate limit
+            with print_lock:
+                print(f"Attempt {attempt + 1}/{API_MAX_RETRIES + 1} [Gemini Row {row_identifier}]: Rate limit likely exceeded - {e}")
+        except google_exceptions.DeadlineExceeded as e: # Timeout
+             with print_lock:
+                print(f"Attempt {attempt + 1}/{API_MAX_RETRIES + 1} [Gemini Row {row_identifier}]: API call timed out - {e}")
+        except google_exceptions.InternalServerError as e: # 5xx errors
+             with print_lock:
+                print(f"Attempt {attempt + 1}/{API_MAX_RETRIES + 1} [Gemini Row {row_identifier}]: Internal Server Error - {e}")
+        except google_exceptions.ServiceUnavailable as e:
+             with print_lock:
+                print(f"Attempt {attempt + 1}/{API_MAX_RETRIES + 1} [Gemini Row {row_identifier}]: Service Unavailable - {e}")
+        except google_exceptions.GoogleAPICallError as e: # General Google API errors
+            with print_lock:
+                print(f"Attempt {attempt + 1}/{API_MAX_RETRIES + 1} [Gemini Row {row_identifier}]: Google API Call Error - {e}")
+        except Exception as e: # Catch any other unexpected errors
+             with print_lock:
+                print(f"Attempt {attempt + 1}/{API_MAX_RETRIES + 1} [Gemini Row {row_identifier}]: Unexpected Error - {e}")
+        
+        # Prepare for retry if applicable
+        if attempt < API_MAX_RETRIES:
+            wait_time = min(current_retry_delay + random.uniform(0, 1), API_MAX_RETRY_DELAY)
+            with print_lock:
+                print(f"Retrying [Gemini Row {row_identifier}] in {wait_time:.2f} seconds...")
+            time.sleep(wait_time)
+            current_retry_delay *= 2
+        else:
+            with print_lock:
+                print(f"Error [Gemini Row {row_identifier}]: Max retries reached for: '{user_content[:50]}...'")
+            return None # Indicate final failure
+
+    return None
+
 # --- Dispatcher --- 
 
 def call_active_api(system_prompt, user_content, row_identifier="N/A"):
@@ -241,7 +347,8 @@ def call_active_api(system_prompt, user_content, row_identifier="N/A"):
         return call_perplexity_api(system_prompt, user_content, row_identifier)
     elif ACTIVE_API == "OPENAI":
         return call_openai_api(system_prompt, user_content, row_identifier)
-    # Add elif for "GEMINI" here later
+    elif ACTIVE_API == "GEMINI":
+        return call_gemini_api(system_prompt, user_content, row_identifier)
     else:
         with print_lock:
             print(f"Error: Unsupported ACTIVE_API value '{ACTIVE_API}' in .env file.")
@@ -347,8 +454,11 @@ if __name__ == "__main__":
     elif ACTIVE_API == "OPENAI" and (not OPENAI_API_KEY or not OPENAI_MODEL):
         print(f"Critical Error: OPENAI_API_KEY or OPENAI_MODEL not found in .env file for active API. Exiting.")
         exit(1)
-    elif ACTIVE_API not in ["PERPLEXITY", "OPENAI"]:
-         print(f"Critical Error: Invalid ACTIVE_API value '{ACTIVE_API}'. Choose 'PERPLEXITY' or 'OPENAI'. Exiting.")
+    elif ACTIVE_API == "GEMINI" and (not GEMINI_API_KEY or not GEMINI_MODEL):
+        print(f"Critical Error: GEMINI_API_KEY or GEMINI_MODEL not found in .env file for active API. Exiting.")
+        exit(1)
+    elif ACTIVE_API not in ["PERPLEXITY", "OPENAI", "GEMINI"]:
+         print(f"Critical Error: Invalid ACTIVE_API value '{ACTIVE_API}'. Choose 'PERPLEXITY', 'OPENAI', or 'GEMINI'. Exiting.")
          exit(1)
          
     # Initialize OpenAI client if needed (moved from global scope for clarity)

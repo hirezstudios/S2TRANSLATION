@@ -929,10 +929,12 @@ def generate_stages_report(batch_id, output_file_path):
     # Fetch all task data for the batch
     conn = db_manager.get_db_connection(db_path)
     try:
+        # Ensure ALL required columns are selected
         cursor = conn.execute("""
             SELECT task_id, row_index_in_file, language_code, source_text, 
                    initial_translation, evaluation_score, evaluation_feedback, 
-                   final_translation, status, error_message
+                   final_translation, approved_translation, review_status, -- Added these two
+                   status as task_status, error_message -- Alias status to avoid conflict 
             FROM TranslationTasks 
             WHERE batch_id = ? 
             ORDER BY row_index_in_file ASC, language_code ASC
@@ -948,12 +950,13 @@ def generate_stages_report(batch_id, output_file_path):
         logger.warning(f"No tasks found for stages report (batch {batch_id})")
         # Write empty file with header?
 
-    # Define header including review status and approved translation
+    # Define header for the report
     report_header = [
         'task_id', 'row_index', 'language', 'source', 
         'initial_translation', 'eval_score', 'eval_feedback', 
-        'final_translation', 'approved_translation', 'review_status', # Added review columns
-        'final_status', 'error'
+        'final_llm_translation', # Renamed header
+        'approved_translation', 'review_status', 
+        'task_status', 'error' # Renamed header
     ]
 
     try:
@@ -962,7 +965,7 @@ def generate_stages_report(batch_id, output_file_path):
             writer = csv.DictWriter(outfile, fieldnames=report_header, extrasaction='ignore')
             writer.writeheader()
             for task_row in tasks:
-                # Map DB columns to report header names (include new ones)
+                # Map DB columns to report header names
                 row_dict = {
                     'task_id': task_row['task_id'],
                     'row_index': task_row['row_index_in_file'],
@@ -971,10 +974,10 @@ def generate_stages_report(batch_id, output_file_path):
                     'initial_translation': task_row['initial_translation'],
                     'eval_score': task_row['evaluation_score'],
                     'eval_feedback': task_row['evaluation_feedback'],
-                    'final_translation': task_row['final_translation'],
+                    'final_llm_translation': task_row['final_translation'], # Map to new header name
                     'approved_translation': task_row['approved_translation'],
                     'review_status': task_row['review_status'],
-                    'final_status': task_row['status'],
+                    'task_status': task_row['task_status'], # Use aliased column name
                     'error': task_row['error_message']
                 }
                 writer.writerow(row_dict)

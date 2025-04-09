@@ -44,6 +44,51 @@ if 'export_filename' not in st.session_state:
 st.set_page_config(layout="wide")
 st.title("SMITE 2 Translation Helper")
 
+# --- Helper Functions --- #
+def get_valid_languages(uploaded_file):
+    """Determines valid languages based on file columns, config, and loaded prompts."""
+    valid_languages = []
+    if not uploaded_file:
+        return []
+        
+    try:
+        # Read just the header
+        # Save temporary copy to read header
+        temp_dir = "temp_uploads"
+        os.makedirs(temp_dir, exist_ok=True)
+        temp_file_path = os.path.join(temp_dir, f"temp_header_{uploaded_file.name}")
+        with open(temp_file_path, "wb") as f:
+            f.write(uploaded_file.getbuffer())
+            
+        df_header = pd.read_csv(temp_file_path, nrows=0)
+        os.remove(temp_file_path) # Clean up temp file
+        
+        header = df_header.columns.tolist()
+        logger.info(f"Input file header: {header}")
+        
+        potential_langs = set()
+        for col in header:
+            if col.startswith("tg_"):
+                potential_langs.add(col[3:]) # Add the code, e.g., "esLA"
+        
+        logger.info(f"Potential languages from file: {potential_langs}")
+        logger.info(f"Languages configured in .env: {config.AVAILABLE_LANGUAGES}")
+        logger.info(f"Languages with loaded prompts: {list(prompt_manager.stage1_templates.keys())}")
+
+        # Find intersection
+        for lang_code in config.AVAILABLE_LANGUAGES:
+            if lang_code in potential_langs and lang_code in prompt_manager.stage1_templates:
+                valid_languages.append(lang_code)
+                
+        logger.info(f"Valid languages for selection: {valid_languages}")
+        
+    except Exception as e:
+        st.error(f"Error reading CSV header: {e}")
+        logger.error(f"Error reading CSV header: {e}")
+        return []
+        
+    return sorted(valid_languages)
+
 # --- UI Sections ---
 st.header("1. Upload & Configure")
 
@@ -51,16 +96,33 @@ uploaded_file = st.file_uploader("Upload Input CSV File", type=["csv"])
 
 if uploaded_file:
     st.success(f"Uploaded: {uploaded_file.name}")
-    # TODO: Add file parsing and language detection here
+    # Get valid languages based on the uploaded file
+    valid_languages_for_ui = get_valid_languages(uploaded_file)
+    
+    if not valid_languages_for_ui:
+        st.warning("No translatable languages found based on file columns, .env configuration, and available prompt files. Please check your input file and setup.")
+        st.stop()
 else:
     st.info("Please upload a CSV file to begin.")
     st.stop()
 
-# Placeholder for language selection
+# Language Selection (Dynamic)
 st.subheader("Select Languages")
-# TODO: Populate dynamically
-available_langs_ui = ["esLA", "frFR"] 
-selected_languages = st.multiselect("Languages to Translate (must exist in file & prompts)", available_langs_ui, default=available_langs_ui)
+select_all = st.checkbox("Select All Valid Languages")
+if select_all:
+    selected_languages = st.multiselect(
+        "Languages to Translate", 
+        valid_languages_for_ui, 
+        default=valid_languages_for_ui, # Select all by default if checkbox is ticked
+        key="lang_multiselect"
+    )
+else:
+    selected_languages = st.multiselect(
+        "Languages to Translate", 
+        valid_languages_for_ui,
+        default=None, # No default selection if checkbox is not ticked
+        key="lang_multiselect"
+    )
 
 # Mode & API Configuration
 st.subheader("Configuration")
@@ -76,22 +138,48 @@ with col1:
 
 with col2:
     st.write("API Configuration")
+    # Store API selections directly in session state via keys
     if mode == "ONE_STAGE":
-        # Simple API select for ONE_STAGE
         one_stage_api = st.selectbox(
             "API for Translation", 
             options=config.VALID_APIS,
-            index=config.VALID_APIS.index(config.DEFAULT_API), # Default
-            key="one_stage_api"
+            index=config.VALID_APIS.index(config.DEFAULT_API),
+            key="one_stage_api" # Key for session state
         )
-        # TODO: Add model selection based on API?
-    
+        # Get default model for the selected API
+        api_default_model = getattr(config, f"{one_stage_api}_MODEL", "")
+        st.text_input(
+            "Model Override (Optional)", 
+            key="one_stage_model_override", # Key for session state
+            placeholder=f"Default: {api_default_model}"
+        )
+        # Ensure stage-specific keys are None if mode is ONE_STAGE
+        st.session_state.s1_api = None
+        st.session_state.s2_api = None
+        st.session_state.s3_api = None
+        st.session_state.s1_model_override = None
+        st.session_state.s2_model_override = None
+        st.session_state.s3_model_override = None
+
     elif mode == "THREE_STAGE":
-        # Per-stage API selection
-        s1_api = st.selectbox("Stage 1 API (Translate)", options=config.VALID_APIS, index=config.VALID_APIS.index(config.STAGE1_API), key="s1_api")
-        s2_api = st.selectbox("Stage 2 API (Evaluate)", options=config.VALID_APIS, index=config.VALID_APIS.index(config.STAGE2_API), key="s2_api")
-        s3_api = st.selectbox("Stage 3 API (Refine)", options=config.VALID_APIS, index=config.VALID_APIS.index(config.STAGE3_API), key="s3_api")
-        # TODO: Add optional model override inputs?
+        s1_api_default_index = config.VALID_APIS.index(config.STAGE1_API) if config.STAGE1_API in config.VALID_APIS else 0
+        s1_api = st.selectbox("Stage 1 API (Translate)", options=config.VALID_APIS, index=s1_api_default_index, key="s1_api")
+        s1_default_model = getattr(config, f"{s1_api}_MODEL", "")
+        st.text_input("S1 Model Override", key="s1_model_override", placeholder=f"Default: {s1_default_model}")
+        
+        s2_api_default_index = config.VALID_APIS.index(config.STAGE2_API) if config.STAGE2_API in config.VALID_APIS else 0
+        s2_api = st.selectbox("Stage 2 API (Evaluate)", options=config.VALID_APIS, index=s2_api_default_index, key="s2_api")
+        s2_default_model = getattr(config, f"{s2_api}_MODEL", "")
+        st.text_input("S2 Model Override", key="s2_model_override", placeholder=f"Default: {s2_default_model}")
+
+        s3_api_default_index = config.VALID_APIS.index(config.STAGE3_API) if config.STAGE3_API in config.VALID_APIS else 0
+        s3_api = st.selectbox("Stage 3 API (Refine)", options=config.VALID_APIS, index=s3_api_default_index, key="s3_api")
+        s3_default_model = getattr(config, f"{s3_api}_MODEL", "")
+        st.text_input("S3 Model Override", key="s3_model_override", placeholder=f"Default: {s3_default_model}")
+        
+        # Ensure one-stage keys are None
+        st.session_state.one_stage_api = None
+        st.session_state.one_stage_model_override = None
 
 # --- Job Control & Monitoring --- #
 st.header("2. Run Translation")
@@ -112,13 +200,20 @@ def run_translation_thread(file_path, selected_langs, mode_config):
             
             if success:
                 st.session_state['batch_status'] = 'completed'
-                st.session_state['export_data'] = processed_data # Store data for export
-                st.session_state['export_filename'] = f"output_{os.path.splitext(uploaded_file.name)[0]}_{mode_config.get('default_api', 'unknown')}_batch_{batch_id[:8]}.csv"
+                st.session_state['export_data'] = processed_data
+                # Corrected filename generation using original uploaded file name
+                # Use API from config for consistency (e.g., default API for the batch)
+                base_name = os.path.splitext(uploaded_file.name)[0]
+                api_name = mode_config.get('default_api', 'unknown').lower()
+                st.session_state['export_filename'] = f"output_{base_name}_{api_name}_batch_{batch_id[:8]}.csv"
                 logger.info(f"Batch {batch_id} completed successfully.")
             else:
                 st.session_state['batch_status'] = 'completed_with_errors'
-                st.session_state['export_data'] = processed_data # Store partial data?
-                st.session_state['export_filename'] = f"output_{os.path.splitext(uploaded_file.name)[0]}_{mode_config.get('default_api', 'unknown')}_batch_{batch_id[:8]}_ERRORS.csv"
+                st.session_state['export_data'] = processed_data 
+                # Corrected filename generation
+                base_name = os.path.splitext(uploaded_file.name)[0]
+                api_name = mode_config.get('default_api', 'unknown').lower()
+                st.session_state['export_filename'] = f"output_{base_name}_{api_name}_batch_{batch_id[:8]}_ERRORS.csv"
                 logger.warning(f"Batch {batch_id} completed with errors.")
         else:
             st.session_state['batch_status'] = 'failed'
@@ -139,31 +234,46 @@ if st.button("Start Translation Job", disabled=disable_start):
     if not selected_languages:
         st.warning("Please select at least one language to translate.")
     else:
-        # Save uploaded file temporarily (Streamlit handles this somewhat)
-        # Using uploaded_file.name might be okay if running locally, but need a robust path
-        # For simplicity now, assume backend can read from the uploaded file object path if possible
-        # A safer way is to save it explicitly: 
+        # Save uploaded file temporarily
         temp_dir = "temp_uploads"
         os.makedirs(temp_dir, exist_ok=True)
-        file_path = os.path.join(temp_dir, uploaded_file.name)
+        # Use a unique name for the temp file to avoid conflicts
+        temp_file_name = f"{uuid.uuid4()}_{uploaded_file.name}"
+        file_path = os.path.join(temp_dir, temp_file_name)
         with open(file_path, "wb") as f:
             f.write(uploaded_file.getbuffer())
         logger.info(f"Saved uploaded file temporarily to: {file_path}")
 
-        # Collect config from UI
-        mode_config = {
-            "mode": st.session_state.translation_mode,
-            "default_api": st.session_state.get("one_stage_api", config.DEFAULT_API), # Get value if exists
-            "s1_api": st.session_state.get("s1_api", config.STAGE1_API),
-            "s2_api": st.session_state.get("s2_api", config.STAGE2_API),
-            "s3_api": st.session_state.get("s3_api", config.STAGE3_API),
-            # Add models later
-        }
+        # Collect config from UI state
+        mode = st.session_state.translation_mode
+        if mode == "ONE_STAGE":
+            final_mode_config = {
+                "mode": mode,
+                "default_api": st.session_state.one_stage_api,
+                "one_stage_model": st.session_state.one_stage_model_override or None, # Use None if empty
+                # Set stage APIs to the selected one-stage API for consistency in backend
+                "s1_api": st.session_state.one_stage_api, "s1_model": st.session_state.one_stage_model_override or None,
+                "s2_api": None, "s2_model": None, # Not used in ONE_STAGE
+                "s3_api": None, "s3_model": None, # Not used in ONE_STAGE
+            }
+        else: # THREE_STAGE
+             final_mode_config = {
+                "mode": mode,
+                "default_api": config.DEFAULT_API, # Still needed for filename
+                "s1_api": st.session_state.s1_api,
+                "s2_api": st.session_state.s2_api,
+                "s3_api": st.session_state.s3_api,
+                "s1_model": st.session_state.s1_model_override or None, 
+                "s2_model": st.session_state.s2_model_override or None,
+                "s3_model": st.session_state.s3_model_override or None,
+            }
+        
+        logger.info(f"Starting job with config: {final_mode_config}")
 
         # Start background thread
         thread = threading.Thread(
             target=run_translation_thread, 
-            args=(file_path, selected_languages, mode_config)
+            args=(file_path, selected_languages, final_mode_config) # Pass collected config
         )
         st.session_state['processing_thread'] = thread
         st.session_state['batch_status'] = 'preparing' # Set status immediately
@@ -174,41 +284,58 @@ if st.button("Start Translation Job", disabled=disable_start):
 
 # Display Status / Progress
 if st.session_state['batch_status'] == 'preparing':
-    st.info(f"Preparing batch...")
+    st.info(f"Preparing batch...") # Keep simple
 elif st.session_state['batch_status'] == 'processing':
-    st.info(f"Processing Batch ID: {st.session_state['current_batch_id']}...")
+    # Display Batch ID clearly
+    st.info(f"Processing Batch ID: {st.session_state.get('current_batch_id', 'N/A')}...") 
     with st.spinner("Translating..."): 
-        # We just show spinner; actual progress requires polling DB or thread communication
         pass 
 elif st.session_state['batch_status'] == 'completed':
-    st.success(f"Batch {st.session_state['current_batch_id']} completed successfully!")
+    st.success(f"Batch {st.session_state.get('current_batch_id', 'N/A')} completed successfully!")
 elif st.session_state['batch_status'] == 'completed_with_errors':
-    st.warning(f"Batch {st.session_state['current_batch_id']} completed with errors. Check logs and Audit file.")
+    st.warning(f"Batch {st.session_state.get('current_batch_id', 'N/A')} completed with errors. Check logs and Audit file.")
 elif st.session_state['batch_status'] == 'failed':
-    st.error(f"Batch preparation or processing failed. Check logs.")
+    st.error(f"Batch {st.session_state.get('current_batch_id', 'N/A')} preparation or processing failed. Check logs.")
 
 # --- Export --- #
 st.header("3. Export Results")
 
-# Enable download only if completed (with or without errors) and data exists
 enable_download = st.session_state['batch_status'] in ['completed', 'completed_with_errors'] and st.session_state['export_data'] is not None
 
 if enable_download:
-    # Convert processed data (list of dicts) to CSV string for download
     try:
-        df = pd.DataFrame(st.session_state['export_data'])
-        # Reorder columns based on expected header if possible (needs header info)
-        # For now, use DataFrame's default order
-        csv_data = df.to_csv(index=False).encode('utf-8')
-        
-        st.download_button(
-            label="Download Output CSV",
-            data=csv_data,
-            file_name=st.session_state.get('export_filename', 'translation_output.csv'),
-            mime='text/csv',
-        )
+        # Ensure export_data is a list of dicts
+        if isinstance(st.session_state['export_data'], list) and len(st.session_state['export_data']) > 0:
+            df = pd.DataFrame(st.session_state['export_data'])
+            
+            # Attempt to reconstruct header order (Source, Metadata sorted, Targets sorted)
+            # This might not match original input exactly
+            all_columns = set(df.columns)
+            source_col = config.SOURCE_COLUMN
+            metadata_cols = sorted([c for c in all_columns if not c.startswith("tg_") and c != source_col])
+            target_cols = sorted([c for c in all_columns if c.startswith("tg_")])
+            ordered_header = [source_col] + metadata_cols + target_cols
+            
+            # Reindex DataFrame columns
+            df_ordered = df[ordered_header]
+            
+            csv_data = df_ordered.to_csv(index=False).encode('utf-8')
+            
+            st.download_button(
+                label="Download Output CSV",
+                data=csv_data,
+                file_name=st.session_state.get('export_filename', 'translation_output.csv'), # Use filename set by thread
+                mime='text/csv',
+            )
+        elif isinstance(st.session_state['export_data'], list) and len(st.session_state['export_data']) == 0:
+            st.info("Processing resulted in no data to export.")
+        else:
+             st.error("Export data is in an unexpected format.")
+             logger.error(f"Export data type mismatch: {type(st.session_state['export_data'])}")
+
     except Exception as e:
         st.error(f"Failed to prepare data for download: {e}")
+        logger.exception("Error preparing download data:")
 else:
     st.info("Complete a translation job to enable export.")
 

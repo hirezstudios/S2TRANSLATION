@@ -53,7 +53,16 @@ TARGET_COLUMN = f"tg_{LANGUAGE_CODE}"
 
 # --- Workflow Configuration ---
 TRANSLATION_MODE = os.getenv("TRANSLATION_MODE", "ONE_STAGE").upper()
-AUDIT_LOG_FILE = os.getenv("AUDIT_LOG_FILE", f"output/audit_log_{LANGUAGE_CODE}_{ACTIVE_API.lower()}.jsonl")
+# Determine default API for filename/one-stage mode
+DEFAULT_API = os.getenv("ACTIVE_API", "PERPLEXITY").upper() 
+AUDIT_LOG_FILE = os.getenv("AUDIT_LOG_FILE", f"output/audit_log_{LANGUAGE_CODE}_{DEFAULT_API.lower()}.jsonl")
+# Stage-specific API/Model Settings
+STAGE1_API = os.getenv("STAGE1_API", DEFAULT_API).upper()
+STAGE2_API = os.getenv("STAGE2_API", DEFAULT_API).upper()
+STAGE3_API = os.getenv("STAGE3_API", DEFAULT_API).upper()
+STAGE1_MODEL_OVERRIDE = os.getenv("STAGE1_MODEL")
+STAGE2_MODEL_OVERRIDE = os.getenv("STAGE2_MODEL")
+STAGE3_MODEL_OVERRIDE = os.getenv("STAGE3_MODEL")
 # Define system prompt file paths
 STAGE1_PROMPT_FILE = f"system_prompts/tg_{LANGUAGE_CODE}.md"
 STAGE2_PROMPT_FILE = f"system_prompts/stage2_evaluate_{LANGUAGE_CODE}.md"
@@ -122,7 +131,7 @@ def load_single_prompt(filepath):
 
 # --- API Call Functions --- 
 
-def call_perplexity_api(system_prompt, user_content, row_identifier="N/A"):
+def call_perplexity_api(system_prompt, user_content, row_identifier="N/A", model_override=None):
     """Calls the Perplexity API for translation with retry logic and parses the output."""
     # Note: API_KEY and MODEL are now PPLX_ specific
     if not PPLX_API_KEY:
@@ -134,13 +143,19 @@ def call_perplexity_api(system_prompt, user_content, row_identifier="N/A"):
             print(f"Error [Row {row_identifier}]: PERPLEXITY_MODEL not found.")
         return None
         
+    target_model = model_override if model_override else PPLX_MODEL
+    if not target_model:
+        with print_lock:
+            print(f"Error [Row {row_identifier}]: No Perplexity model specified (default or override).")
+        return None
+        
     headers = {
         "Authorization": f"Bearer {PPLX_API_KEY}",
         "Content-Type": "application/json",
         "accept": "application/json"
     }
     payload = {
-        "model": PPLX_MODEL,
+        "model": target_model,
         "messages": [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_content}
@@ -199,7 +214,7 @@ def call_perplexity_api(system_prompt, user_content, row_identifier="N/A"):
             
     return None 
 
-def call_openai_api(system_prompt, user_content, row_identifier="N/A"):
+def call_openai_api(system_prompt, user_content, row_identifier="N/A", model_override=None):
     """Calls the OpenAI Responses API for translation with retry logic and parses the output."""
     if not openai_client:
         with print_lock:
@@ -210,11 +225,17 @@ def call_openai_api(system_prompt, user_content, row_identifier="N/A"):
              print(f"Error [Row {row_identifier}]: OPENAI_MODEL not found in .env file.")
          return None
 
+    target_model = model_override if model_override else OPENAI_MODEL
+    if not target_model:
+         with print_lock:
+             print(f"Error [Row {row_identifier}]: No OpenAI model specified (default or override).")
+         return None
+
     current_retry_delay = API_INITIAL_RETRY_DELAY
     for attempt in range(API_MAX_RETRIES + 1):
         try:
             response = openai_client.responses.create(
-                model=OPENAI_MODEL,
+                model=target_model,
                 input=user_content, # Direct string input for simple text
                 instructions=system_prompt,
                 temperature=0.2,
@@ -285,7 +306,7 @@ def call_openai_api(system_prompt, user_content, row_identifier="N/A"):
 
     return None
 
-def call_gemini_api(system_prompt, user_content, row_identifier="N/A"):
+def call_gemini_api(system_prompt, user_content, row_identifier="N/A", model_override=None):
     """Calls the Gemini API for translation with retry logic and parses the output."""
     # Check for API key first
     if not GEMINI_API_KEY:
@@ -318,10 +339,16 @@ def call_gemini_api(system_prompt, user_content, row_identifier="N/A"):
         HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE,
     }
 
+    target_model = model_override if model_override else GEMINI_MODEL
+    if not target_model:
+         with print_lock:
+             print(f"Error [Row {row_identifier}]: No Gemini model specified (default or override).")
+         return None
+
     # Create the model instance 
     try:
         model = genai.GenerativeModel(
-            model_name=GEMINI_MODEL,
+            model_name=target_model,
             system_instruction=system_prompt,
             generation_config=generation_config,
             safety_settings=safety_settings
@@ -385,18 +412,18 @@ def call_gemini_api(system_prompt, user_content, row_identifier="N/A"):
 
 # --- Dispatcher --- 
 
-def call_active_api(system_prompt, user_content, row_identifier="N/A"):
-    """Calls the currently active API based on ACTIVE_API setting."""
-    if ACTIVE_API == "PERPLEXITY":
-        return call_perplexity_api(system_prompt, user_content, row_identifier)
-    elif ACTIVE_API == "OPENAI":
-        return call_openai_api(system_prompt, user_content, row_identifier)
-    elif ACTIVE_API == "GEMINI":
-        return call_gemini_api(system_prompt, user_content, row_identifier)
+def call_active_api(target_api, system_prompt, user_content, row_identifier="N/A", model_override=None):
+    """Calls the specified target API."""
+    if target_api == "PERPLEXITY":
+        return call_perplexity_api(system_prompt, user_content, row_identifier, model_override)
+    elif target_api == "OPENAI":
+        return call_openai_api(system_prompt, user_content, row_identifier, model_override)
+    elif target_api == "GEMINI":
+        return call_gemini_api(system_prompt, user_content, row_identifier, model_override)
     else:
         with print_lock:
-            print(f"Error: Unsupported ACTIVE_API value '{ACTIVE_API}' in .env file.")
-        return None # Or raise an error
+            print(f"Error: Unsupported target_api value '{target_api}'.")
+        return None
 
 # --- Audit Logging --- 
 def log_audit_record(record):
@@ -418,27 +445,27 @@ def translate_row_worker(row_data):
     row, row_index = row_data # Unpack data (system prompts are global now)
     source_text = row.get(SOURCE_COLUMN, "").strip()
     final_translation = "" # Initialize
-    audit_record = {
+    audit_record_base = {
         "row_index": row_index + 1, # 1-based index for readability
         "source": source_text,
-        "api": ACTIVE_API,
         "mode": TRANSLATION_MODE,
-        "initial_translation": None,
-        "evaluation": None,
-        "final_translation": None,
-        "error": None
     }
 
     if not source_text:
         row[TARGET_COLUMN] = ""
         # Optionally log empty source rows to audit?
-        # log_audit_record({**audit_record, "error": "Empty source text"})
+        # log_audit_record({**audit_record_base, "error": "Empty source text"})
         return row # Return unmodified row if source is empty
 
     try:
         if TRANSLATION_MODE == "ONE_STAGE":
-            # --- One Stage Workflow --- 
-            final_translation = call_active_api(stage1_system_prompt, source_text, row_identifier=row_index + 2)
+            # Use DEFAULT_API and its default model (no override needed here)
+            api_to_use = DEFAULT_API
+            model_to_use = None # Use default model for the API
+            audit_record = {**audit_record_base, "api": api_to_use, "model": model_to_use or "default"} 
+            
+            final_translation = call_active_api(api_to_use, stage1_system_prompt, source_text, 
+                                                row_identifier=row_index + 2, model_override=model_to_use)
             if final_translation is not None:
                 with print_lock: translated_counter += 1
                 audit_record["final_translation"] = final_translation
@@ -453,7 +480,11 @@ def translate_row_worker(row_data):
         elif TRANSLATION_MODE == "THREE_STAGE":
             # --- Three Stage Workflow --- 
             # Stage 1: Initial Translation
-            initial_translation = call_active_api(stage1_system_prompt, source_text, row_identifier=f"{row_index + 2}-S1")
+            s1_api = STAGE1_API
+            s1_model = STAGE1_MODEL_OVERRIDE # Can be None
+            audit_record = {**audit_record_base, "stage1_api": s1_api, "stage1_model": s1_model or "default"}
+            initial_translation = call_active_api(s1_api, stage1_system_prompt, source_text, 
+                                                row_identifier=f"{row_index + 2}-S1", model_override=s1_model)
             audit_record["initial_translation"] = initial_translation
 
             if initial_translation is None:
@@ -468,7 +499,8 @@ def translate_row_worker(row_data):
                 # Basic example, replace placeholders correctly later
                 eval_prompt = stage2_system_prompt.replace("<<RULES>>", "[Rules Not Inserted Yet]") # Placeholder
                 eval_input = f"Source: {source_text}\nTranslation: {initial_translation}"
-                evaluation = call_active_api(eval_prompt, eval_input, row_identifier=f"{row_index + 2}-S2")
+                evaluation = call_active_api(STAGE2_API, eval_prompt, eval_input, 
+                                           row_identifier=f"{row_index + 2}-S2", model_override=STAGE2_MODEL_OVERRIDE)
                 audit_record["evaluation"] = evaluation
 
                 if evaluation is None:
@@ -486,7 +518,8 @@ def translate_row_worker(row_data):
                                                         .replace("<<FEEDBACK>>", evaluation)
                     # The user content for refine is often just the instruction to refine based on context
                     # Or sometimes the refine prompt itself contains all context. Let's assume the latter for now.
-                    final_translation = call_active_api(refine_prompt, "Refine the translation based on the provided feedback.", row_identifier=f"{row_index + 2}-S3")
+                    final_translation = call_active_api(STAGE3_API, refine_prompt, "Refine the translation based on the provided feedback.", 
+                                                      row_identifier=f"{row_index + 2}-S3", model_override=STAGE3_MODEL_OVERRIDE)
                     audit_record["final_translation"] = final_translation
 
                     if final_translation is None:
@@ -503,8 +536,8 @@ def translate_row_worker(row_data):
              with print_lock: print(f"Error: Unknown TRANSLATION_MODE '{TRANSLATION_MODE}'")
              error_counter += 1
              final_translation = "" 
-             audit_record["error"] = f"Unknown TRANSLATION_MODE: {TRANSLATION_MODE}"
-             log_audit_record(audit_record)
+             audit_record_base["error"] = f"Unknown TRANSLATION_MODE: {TRANSLATION_MODE}"
+             log_audit_record(audit_record_base)
 
     except Exception as e:
         # Catch unexpected errors within the worker's logic
@@ -512,8 +545,8 @@ def translate_row_worker(row_data):
             print(f"Critical Error in worker for row {row_index+2}: {e}")
         error_counter += 1
         final_translation = "" # Ensure it's empty on critical worker error
-        audit_record["error"] = f"Critical worker error: {e}"
-        log_audit_record(audit_record)
+        audit_record_base["error"] = f"Critical worker error: {e}"
+        log_audit_record(audit_record_base)
 
     # --- Update the row for the main CSV output --- 
     row[TARGET_COLUMN] = final_translation 
@@ -548,11 +581,11 @@ def translate_csv(input_file, output_file):
         
         total_rows = len(rows_to_process)
         print(f"Using Mode: {TRANSLATION_MODE}")
-        print(f"Translating {total_rows} rows using {ACTIVE_API} (up to {MAX_WORKER_THREADS} threads)... Output: {output_file}")
+        print(f"Translating {total_rows} rows (Default API: {DEFAULT_API}, up to {MAX_WORKER_THREADS} threads)... Output: {output_file}")
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKER_THREADS) as executor:
             futures = [executor.submit(translate_row_worker, row_data) for row_data in rows_to_process]
-            for future in tqdm(concurrent.futures.as_completed(futures), total=total_rows, desc=f"Translating ({ACTIVE_API} - {TRANSLATION_MODE})"):
+            for future in tqdm(concurrent.futures.as_completed(futures), total=total_rows, desc=f"Translating ({DEFAULT_API} - {TRANSLATION_MODE})"):
                 try:
                     processed_rows.append(future.result()) 
                 except Exception as e:
@@ -586,32 +619,47 @@ def translate_csv(input_file, output_file):
         exit(1)
 
 if __name__ == "__main__":
-    # Check presence of keys for the *active* API
-    print(f"Selected API: {ACTIVE_API}")
-    if ACTIVE_API == "PERPLEXITY" and (not PPLX_API_KEY or not PPLX_MODEL):
-        print(f"Critical Error: PERPLEXITY_API_KEY or PERPLEXITY_MODEL not found in .env file for active API. Exiting.")
-        exit(1)
-    elif ACTIVE_API == "OPENAI" and (not OPENAI_API_KEY or not OPENAI_MODEL):
-        print(f"Critical Error: OPENAI_API_KEY or OPENAI_MODEL not found in .env file for active API. Exiting.")
-        exit(1)
-    elif ACTIVE_API == "GEMINI" and (not GEMINI_API_KEY or not GEMINI_MODEL):
-        print(f"Critical Error: GEMINI_API_KEY or GEMINI_MODEL not found in .env file for active API. Exiting.")
-        exit(1)
-    elif ACTIVE_API not in ["PERPLEXITY", "OPENAI", "GEMINI"]:
-         print(f"Critical Error: Invalid ACTIVE_API value '{ACTIVE_API}'. Choose 'PERPLEXITY', 'OPENAI', or 'GEMINI'. Exiting.")
+    # Check presence of keys for *all potentially used* APIs if in THREE_STAGE mode
+    print(f"Selected Mode: {TRANSLATION_MODE}")
+    print(f"Default API (for ONE_STAGE/Filename): {DEFAULT_API}")
+    apis_to_check = set([DEFAULT_API])
+    if TRANSLATION_MODE == "THREE_STAGE":
+        print(f"Stage APIs: S1={STAGE1_API}, S2={STAGE2_API}, S3={STAGE3_API}")
+        apis_to_check.update([STAGE1_API, STAGE2_API, STAGE3_API])
+    
+    # Check keys/models for all APIs that might be used
+    if "PERPLEXITY" in apis_to_check and (not PPLX_API_KEY or not PPLX_MODEL):
+         print(f"Critical Error: Perplexity keys/model missing but required. Exiting.")
          exit(1)
+    if "OPENAI" in apis_to_check and (not OPENAI_API_KEY or not OPENAI_MODEL):
+         print(f"Critical Error: OpenAI keys/model missing but required. Exiting.")
+         exit(1)
+    if "GEMINI" in apis_to_check and (not GEMINI_API_KEY or not GEMINI_MODEL):
+         print(f"Critical Error: Gemini keys/model missing but required. Exiting.")
+         exit(1)
+    
+    # Validate API names
+    valid_apis = ["PERPLEXITY", "OPENAI", "GEMINI"]
+    all_used_apis = list(apis_to_check)
+    if any(api not in valid_apis for api in all_used_apis):
+        invalid_apis = [api for api in all_used_apis if api not in valid_apis]
+        print(f"Critical Error: Invalid API names specified: {invalid_apis}. Must be one of {valid_apis}. Exiting.")
+        exit(1)
          
-    # Initialize OpenAI client if needed (moved from global scope for clarity)
-    if ACTIVE_API == "OPENAI" and not openai_client:
-        try:
-            openai_client = openai.OpenAI(api_key=OPENAI_API_KEY)
-            print("OpenAI client initialized.")
-        except Exception as e:
-            print(f"Critical Error: Failed to initialize OpenAI client: {e}. Exiting.")
-            exit(1)
+    # Initialize clients (moved from globals for clarity and safety)
+    if "OPENAI" in apis_to_check:
+        # Initialize OpenAI client if needed and not already done
+        if not openai_client: 
+            try:
+                openai_client = openai.OpenAI(api_key=OPENAI_API_KEY)
+                print("OpenAI client initialized.")
+            except Exception as e:
+                print(f"Critical Error: Failed to initialize OpenAI client: {e}. Exiting.")
+                exit(1)
+    if "GEMINI" in apis_to_check:
+        # Gemini configuration happens per-call within its function
+        print("Gemini API may be used; configuration will happen per-thread.")
+        pass 
             
-    # Load system prompts based on mode
     load_system_prompts()
-        
-    # Run the main translation process (prompts are now global)
     translate_csv(INPUT_CSV, OUTPUT_CSV) 

@@ -6,6 +6,7 @@ import threading
 import uuid
 import json
 from datetime import datetime
+import time
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(name)s - %(message)s')
@@ -235,92 +236,100 @@ def run_translation_thread(file_path, selected_langs, mode_config):
         # st.rerun() # DO NOT rerun from background thread
         pass
 
-# Disable button if processing
-disable_start = st.session_state['batch_status'] in ['preparing', 'processing']
-
-if st.button("Start Translation Job", disabled=disable_start):
-    if not selected_languages:
+# --- Callback Function --- #
+def start_translation_job_callback():
+    """Callback triggered by the 'Start Translation Job' button."""
+    logger.info("'Start Translation Job' button clicked.")
+    if not selected_languages: # Access selected_languages from the outer scope
         st.warning("Please select at least one language to translate.")
-    else:
-        # Save uploaded file temporarily
-        temp_dir = "temp_uploads"
-        os.makedirs(temp_dir, exist_ok=True)
-        # Use a unique name for the temp file to avoid conflicts
-        temp_file_name = f"{uuid.uuid4()}_{uploaded_file.name}"
-        file_path = os.path.join(temp_dir, temp_file_name)
+        return # Stop callback execution
+        
+    if not uploaded_file: # Access uploaded_file from outer scope
+        st.warning("File upload seems to have been lost. Please re-upload.")
+        return # Stop callback execution
+        
+    # Save uploaded file temporarily
+    temp_dir = "temp_uploads"
+    os.makedirs(temp_dir, exist_ok=True)
+    temp_file_name = f"{uuid.uuid4()}_{uploaded_file.name}"
+    file_path = os.path.join(temp_dir, temp_file_name)
+    try:
         with open(file_path, "wb") as f:
             f.write(uploaded_file.getbuffer())
         logger.info(f"Saved uploaded file temporarily to: {file_path}")
+    except Exception as e:
+        st.error(f"Failed to save uploaded file: {e}")
+        logger.error(f"Failed to save uploaded file: {e}")
+        return
 
-        # Collect config from UI state
-        mode = st.session_state.translation_mode
-        if mode == "ONE_STAGE":
-            final_mode_config = {
-                "mode": mode,
-                "default_api": st.session_state.one_stage_api,
-                "one_stage_model": st.session_state.one_stage_model_override or None, # Use None if empty
-                # Set stage APIs to the selected one-stage API for consistency in backend
-                "s1_api": st.session_state.one_stage_api, "s1_model": st.session_state.one_stage_model_override or None,
-                "s2_api": None, "s2_model": None, # Not used in ONE_STAGE
-                "s3_api": None, "s3_model": None, # Not used in ONE_STAGE
-            }
-        else: # THREE_STAGE
-             final_mode_config = {
-                "mode": mode,
-                "default_api": config.DEFAULT_API, # Still needed for filename
-                "s1_api": st.session_state.s1_api,
-                "s2_api": st.session_state.s2_api,
-                "s3_api": st.session_state.s3_api,
-                "s1_model": st.session_state.s1_model_override or None, 
-                "s2_model": st.session_state.s2_model_override or None,
-                "s3_model": st.session_state.s3_model_override or None,
-            }
-        
-        logger.info(f"Starting job with config: {final_mode_config}")
+    # Collect config from UI state
+    mode = st.session_state.translation_mode
+    if mode == "ONE_STAGE":
+        final_mode_config = {
+            "mode": mode,
+            "default_api": st.session_state.one_stage_api,
+            "one_stage_model": st.session_state.one_stage_model_override or None, 
+            "s1_api": st.session_state.one_stage_api, "s1_model": st.session_state.one_stage_model_override or None,
+            "s2_api": None, "s2_model": None,
+            "s3_api": None, "s3_model": None,
+        }
+    else: # THREE_STAGE
+         final_mode_config = {
+            "mode": mode,
+            "default_api": config.DEFAULT_API,
+            "s1_api": st.session_state.s1_api,
+            "s2_api": st.session_state.s2_api,
+            "s3_api": st.session_state.s3_api,
+            "s1_model": st.session_state.s1_model_override or None, 
+            "s2_model": st.session_state.s2_model_override or None,
+            "s3_model": st.session_state.s3_model_override or None,
+        }
+    
+    logger.info(f"Starting job with config: {final_mode_config}")
 
-        # Start background thread, pass clients via mode_config (or args? cleaner via args)
-        thread = threading.Thread(
-            target=run_translation_thread, 
-            # Pass clients explicitly, not via mode_config dict
-            args=(file_path, selected_languages, final_mode_config) # mode_config is still needed for prepare_batch
-            # Client objects will be accessed within the thread via the imported api_clients module
-            # RETHINK: Passing clients might be safer if module import in thread is tricky
-        )
-        # Let's stick to using the initialized clients from api_clients module
-        # No change needed in thread start args if api_clients initializes correctly on import.
-        # Modify run_translation_thread to get clients directly from api_clients
-        # ... (Revert thread start args)
-        st.session_state['processing_thread'] = thread
-        st.session_state['batch_status'] = 'preparing' # Set status immediately
-        st.session_state['export_data'] = None # Clear previous export data
-        st.session_state['export_filename'] = None
-        thread.start()
-        st.rerun() # Use current rerun API
+    # Start background thread
+    thread = threading.Thread(
+        target=run_translation_thread, 
+        args=(file_path, selected_languages, final_mode_config) 
+    )
+    st.session_state['processing_thread'] = thread
+    st.session_state['batch_status'] = 'preparing' # Set initial status
+    st.session_state['export_data'] = None # Clear previous export data
+    st.session_state['export_filename'] = None
+    thread.start()
+    logger.info("Background translation thread started.")
+    # No st.rerun() here - Streamlit handles it after button click/callback
 
-# Check if a thread is running and has finished
-if 'processing_thread' in st.session_state and st.session_state['processing_thread'] is not None:
-    if not st.session_state['processing_thread'].is_alive():
-        # Thread has finished, trigger a rerun to update UI based on final status set by thread
-        logger.info("Background thread finished, triggering UI update.")
-        st.session_state['processing_thread'] = None # Clear the thread object
-        st.rerun() 
+# --- Button --- #
+# Disable button if processing
+disable_start = st.session_state['batch_status'] in ['preparing', 'processing']
+st.button(
+    "Start Translation Job", 
+    disabled=disable_start, 
+    on_click=start_translation_job_callback # Attach the callback
+)
 
-# Display Status / Progress
+# --- Status Display & Refresh Loop --- #
+
+# Display Status / Progress (includes spinners)
 if st.session_state['batch_status'] == 'preparing':
     st.info(f"Preparing batch...") 
-    # Add a spinner here too while preparing?
-    with st.spinner("Preparing..."):
-        pass # Keep spinner until status changes
+    with st.spinner("Preparing..."): pass
 elif st.session_state['batch_status'] == 'processing':
     st.info(f"Processing Batch ID: {st.session_state.get('current_batch_id', 'N/A')}...") 
-    with st.spinner("Translating..."): 
-        pass # Keep spinner running while processing
+    with st.spinner("Translating..."): pass 
 elif st.session_state['batch_status'] == 'completed':
     st.success(f"Batch {st.session_state.get('current_batch_id', 'N/A')} completed successfully!")
 elif st.session_state['batch_status'] == 'completed_with_errors':
     st.warning(f"Batch {st.session_state.get('current_batch_id', 'N/A')} completed with errors. Check logs and Audit file.")
 elif st.session_state['batch_status'] == 'failed':
     st.error(f"Batch {st.session_state.get('current_batch_id', 'N/A')} preparation or processing failed. Check logs.")
+
+# Refresh Loop: If preparing or processing, wait and rerun
+if st.session_state['batch_status'] in ['preparing', 'processing']:
+    logger.debug(f"Current status is {st.session_state['batch_status']}, sleeping and rerunning...")
+    time.sleep(2) # Wait a couple of seconds before refresh
+    st.rerun()
 
 # --- Export --- #
 st.header("3. Export Results")

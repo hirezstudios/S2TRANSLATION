@@ -3,6 +3,7 @@ import csv
 import requests
 from dotenv import load_dotenv
 import time
+import re # Add import for regex
 
 # Load environment variables from .env file
 load_dotenv()
@@ -33,7 +34,7 @@ def load_system_prompt(filepath):
         exit(1)
 
 def call_perplexity_api(system_prompt, user_content):
-    """Calls the Perplexity API for translation."""
+    """Calls the Perplexity API for translation and parses the output."""
     if not API_KEY:
         print("Error: PERPLEXITY_API_KEY not found in .env file.")
         exit(1)
@@ -60,19 +61,32 @@ def call_perplexity_api(system_prompt, user_content):
         response.raise_for_status() # Raise an exception for bad status codes
         data = response.json()
         
-        # Extract the translation from the response
-        # Adjust this based on the actual API response structure if needed
+        # --- Remove START TEMP DEBUGGING ---
+        # print("--- Raw API Response ---")
+        # print(data)
+        # print("--- End Raw API Response ---")
+        # --- Remove END TEMP DEBUGGING ---
+
+        # Extract the raw content from the response
+        raw_content = "" # Default to empty string
         if data.get("choices") and len(data["choices"]) > 0:
-            translation = data["choices"][0].get("message", {}).get("content")
-            if translation:
-                return translation.strip()
+            raw_content = data["choices"][0].get("message", {}).get("content", "")
+
+        # Parse the content to remove <think> blocks
+        if raw_content:
+            # Use regex to remove the <think> block and any surrounding newlines/whitespace
+            parsed_content = re.sub(r"<think>.*?</think>\s*", "", raw_content, flags=re.DOTALL).strip()
+            
+            if parsed_content:
+                return parsed_content
             else:
-                print(f"Warning: Empty translation received for: {user_content}")
-                return "" # Return empty string for empty translation
+                print(f"Warning: Translation was empty after removing <think> block for: {user_content}")
+                print(f"Original Response Content: {raw_content}")
+                return "" # Return empty string if parsing resulted in empty content
         else:
-            print(f"Warning: Unexpected API response structure for: {user_content}")
-            print(f"Response: {data}")
-            return "" # Return empty string if structure is wrong
+             print(f"Warning: Empty or unexpected API response structure for: {user_content}")
+             print(f"Response: {data}")
+             return "" # Return empty string if structure is wrong
 
     except requests.exceptions.RequestException as e:
         print(f"Error calling Perplexity API: {e}")
@@ -101,36 +115,74 @@ def translate_csv(input_file, output_file, system_prompt):
             row_count = 0
             translated_count = 0
             
-            for row in reader:
-                row_count += 1
+            # --- Remove START TEMP DEBUGGING ---
+            # # Process only the first data row (after header)
+            # first_row = next(reader, None) 
+            # if not first_row:
+            #     print("Error: CSV is empty or has only a header.")
+            #     exit(1)
+            # --- Remove END TEMP DEBUGGING ---
+
+            # --- Remove START TEMP DEBUGGING ---
+            # row_count = 1 # Since we are only processing one row
+            # --- Remove END TEMP DEBUGGING ---
+            
+            for row in reader: # Restore loop for all rows
+                row_count += 1 # Restore row counting
+
+            # --- Remove START TEMP DEBUGGING ---
+            # # Use the first row data
+            # row = first_row 
+            # --- Remove END TEMP DEBUGGING ---
+
                 source_text = row.get(SOURCE_COLUMN, "").strip()
                 
-                # Only translate if source text is not empty
                 if source_text:
                     print(f"Translating row {row_count}: '{source_text[:50]}...'")
+                    # --- Remove START TEMP DEBUGGING ---
+                    # # Directly call and print the result, don't write to file yet
                     translation = call_perplexity_api(system_prompt, source_text)
+                    # print(f"--- Translation Result ---")
+                    # --- Remove END TEMP DEBUGGING ---
                     
-                    if translation is not None:
-                        row[TARGET_COLUMN] = translation
-                        translated_count +=1
+                    if translation is not None: # Check includes empty string now
+                        # --- Remove START TEMP DEBUGGING ---
+                        # print(translation)
+                        # --- Remove END TEMP DEBUGGING ---
+                        row[TARGET_COLUMN] = translation # Assign parsed translation
+                        translated_count += 1
                     else:
-                        # Keep original empty value or handle error case if needed
+                        # --- Remove START TEMP DEBUGGING ---
+                        # print("API call failed.")
+                        # --- Remove END TEMP DEBUGGING ---
+                        # Handle API call failure (returned None)
                         print(f"Skipping translation for row {row_count} due to API error.")
-                        row[TARGET_COLUMN] = "" # Or keep original content: row.get(TARGET_COLUMN, "")
-                    
+                        row[TARGET_COLUMN] = "" # Keep target empty on error
+                    # --- Remove START TEMP DEBUGGING ---
+                    # print(f"--- End Translation Result ---")
+                    # --- Remove END TEMP DEBUGGING ---
+
                     # Add delay between requests
-                    time.sleep(REQUEST_DELAY_SECONDS) 
+                    time.sleep(REQUEST_DELAY_SECONDS) # Restore delay
                 else:
-                    # Keep target empty if source is empty
                     print(f"Skipping row {row_count}: Source text is empty.")
                     row[TARGET_COLUMN] = ""
 
-                writer.writerow(row)
+                # --- Remove START TEMP DEBUGGING ---
+                # Skip writing to file for this test
+                writer.writerow(row) # Restore writing row
+                # --- Remove END TEMP DEBUGGING ---
 
-            print(f"\nTranslation process completed.")
+            # --- Remove START TEMP DEBUGGING ---
+            # print(f"\nTranslation process completed for single row test.")
+            # --- Remove END TEMP DEBUGGING ---
+            print(f"\nTranslation process completed.") # Restore original message
             print(f"Total rows processed: {row_count}")
             print(f"Rows translated: {translated_count}")
-            print(f"Output saved to: {output_file}")
+            # --- Remove START TEMP DEBUGGING ---
+            # # print(f"Output saved to: {output_file}") # No output saved in this test
+            # --- Remove END TEMP DEBUGGING ---
+            print(f"Output saved to: {output_file}") # Restore original message
 
     except FileNotFoundError:
         print(f"Error: Input CSV file not found at {input_file}")

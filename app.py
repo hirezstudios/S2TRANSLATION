@@ -313,11 +313,15 @@ def create_app():
                 # Maybe render an error template?
                 return "Batch not found", 404 
             
-            # Fetch all tasks for this batch for display
-            tasks = db_manager.get_tasks_for_review(db_path, batch_id)
-            logger.info(f"Found {len(tasks)} tasks for batch {batch_id}")
+            # Fetch tasks as sqlite3.Row objects
+            tasks_raw = db_manager.get_tasks_for_review(db_path, batch_id)
+            logger.info(f"Found {len(tasks_raw)} raw tasks for batch {batch_id}")
 
-            return render_template('results.html', batch=batch_info, tasks=tasks)
+            # Convert to list of dictionaries for JSON serialization
+            tasks_list = [dict(task) for task in tasks_raw]
+
+            # Pass the list of dicts to the template
+            return render_template('results.html', batch=batch_info, tasks=tasks_list)
 
         except Exception as e:
             logger.exception(f"Error fetching results for batch {batch_id}: {e}")

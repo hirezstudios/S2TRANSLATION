@@ -189,7 +189,7 @@ def run_translation_thread(file_path, selected_langs, mode_config):
     st.session_state['batch_status'] = 'preparing'
     try:
         # 1. Prepare Batch
-        batch_id = translation_service.prepare_batch(file_path, selected_langs)
+        batch_id = translation_service.prepare_batch(file_path, selected_langs, mode_config)
         if batch_id:
             st.session_state['current_batch_id'] = batch_id
             st.session_state['batch_status'] = 'processing'

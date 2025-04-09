@@ -1,0 +1,121 @@
+{% extends 'base.html' %}
+
+{% block title %}Upload & Configure{% endblock %}
+
+{% block content %}
+    <h2>1. Upload & Configure</h2>
+    <form id="upload-form" action="{{ url_for('start_job') }}" method="post" enctype="multipart/form-data">
+        <div class="mb-3">
+            <label for="csvfile" class="form-label">Input CSV File</label>
+            <input class="form-control" type="file" id="csvfile" name="file" accept=".csv" required>
+        </div>
+
+        <div class="mb-3">
+            <label class="form-label">Languages to Translate</label>
+            <!-- Language options will be populated dynamically by JS after upload -->
+            <div id="language-options">
+                <p class="text-muted">Upload a file to see available languages.</p>
+            </div>
+        </div>
+
+        <div class="row mb-3">
+            <div class="col-md-6">
+                <label class="form-label">Translation Mode</label>
+                <div>
+                    <div class="form-check form-check-inline">
+                        <input class="form-check-input" type="radio" name="mode" id="mode_one" value="ONE_STAGE" checked>
+                        <label class="form-check-label" for="mode_one">One Stage</label>
+                    </div>
+                    <div class="form-check form-check-inline">
+                        <input class="form-check-input" type="radio" name="mode" id="mode_three" value="THREE_STAGE">
+                        <label class="form-check-label" for="mode_three">Three Stage</label>
+                    </div>
+                </div>
+            </div>
+            <div class="col-md-6">
+                <label class="form-label">API Configuration</label>
+                <div id="api-config-one-stage">
+                    <select class="form-select mb-2" name="one_stage_api" id="one_stage_api">
+                        <!-- Options populated by JS/Config -->
+                         <option value="GEMINI">GEMINI</option> 
+                         <option value="OPENAI">OPENAI</option> 
+                         <option value="PERPLEXITY">PERPLEXITY</option> 
+                    </select>
+                    <input type="text" class="form-control" name="one_stage_model" placeholder="Optional Model Override">
+                </div>
+                <div id="api-config-three-stage" style="display: none;">
+                     <label class="form-label small">Stage 1 API:</label>
+                     <select class="form-select mb-1" name="s1_api" id="s1_api">
+                         <option value="GEMINI">GEMINI</option> 
+                         <option value="OPENAI">OPENAI</option> 
+                         <option value="PERPLEXITY">PERPLEXITY</option> 
+                     </select>
+                     <input type="text" class="form-control mb-2" name="s1_model" placeholder="S1 Model Override">
+                     
+                     <label class="form-label small">Stage 2 API:</label>
+                     <select class="form-select mb-1" name="s2_api" id="s2_api">
+                         <option value="GEMINI">GEMINI</option> 
+                         <option value="OPENAI">OPENAI</option> 
+                         <option value="PERPLEXITY">PERPLEXITY</option> 
+                     </select>
+                     <input type="text" class="form-control mb-2" name="s2_model" placeholder="S2 Model Override">
+
+                     <label class="form-label small">Stage 3 API:</label>
+                     <select class="form-select mb-1" name="s3_api" id="s3_api">
+                         <option value="GEMINI">GEMINI</option> 
+                         <option value="OPENAI">OPENAI</option> 
+                         <option value="PERPLEXITY">PERPLEXITY</option> 
+                     </select>
+                     <input type="text" class="form-control" name="s3_model" placeholder="S3 Model Override">
+                </div>
+            </div>
+        </div>
+
+        <button type="submit" class="btn btn-primary">Start Translation Job</button>
+    </form>
+
+    <hr>
+    <h2>2. Job Status</h2>
+    <div id="status-area">
+        <p>Upload a file and start a job to see status.</p>
+    </div>
+    <div id="progress-area"></div>
+
+    <hr>
+    <h2>3. Export Results</h2>
+    <div id="export-area">
+         <!-- Download button will be added here by JS when job is complete -->
+    </div>
+
+{% endblock %}
+
+{% block scripts %}
+<script>
+    // Basic JS for mode selection UI toggle
+    const modeRadios = document.querySelectorAll('input[name="mode"]');
+    const oneStageConfig = document.getElementById('api-config-one-stage');
+    const threeStageConfig = document.getElementById('api-config-three-stage');
+
+    function toggleApiConfig() {
+        if (document.getElementById('mode_one').checked) {
+            oneStageConfig.style.display = 'block';
+            threeStageConfig.style.display = 'none';
+        } else {
+            oneStageConfig.style.display = 'none';
+            threeStageConfig.style.display = 'block';
+        }
+    }
+    modeRadios.forEach(radio => radio.addEventListener('change', toggleApiConfig));
+    // Initial call
+    toggleApiConfig();
+
+    // TODO: Add JS for:
+    // 1. Reading file header on upload to populate language options dynamically.
+    // 2. Submitting the form via Fetch API to /start_job.
+    // 3. Handling the response from /start_job (getting batch_id).
+    // 4. Connecting to SSE endpoint /stream/<batch_id>.
+    // 5. Updating #status-area and #progress-area based on SSE messages.
+    // 6. Adding download button to #export-area when job complete SSE message received.
+
+</script>
+{% endblock %} 

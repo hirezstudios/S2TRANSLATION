@@ -2,4 +2,12 @@ requests
 python-dotenv
 tqdm
 openai
-google-generativeai 
+google-generativeai
+streamlit # Keep for testing?
+pytest
+pandas # Added for CSV handling in app/export
+Flask>=2.0 # Added for web framework
+redis>=4.0 # Added for Celery broker/SSE backend
+celery>=5.0 # Added for background tasks
+Flask-SSE # Added for Server-Sent Events
+# Optional: Gunicorn for deployment 

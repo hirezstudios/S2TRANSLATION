@@ -1,405 +1,110 @@
-import streamlit as st
 import os
-import pandas as pd
 import logging
-import threading
+from flask import Flask, request, render_template, jsonify, Response, stream_with_context
+from flask_sse import sse # Import Flask-SSE
 import uuid
 import json
-from datetime import datetime
-import time
 
-# Configure logging
+# Import backend modules
+from src import config
+from src import db_manager
+from src import translation_service
+from src import prompt_manager
+
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(name)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-# Import backend modules (assuming app.py is in the root or PYTHONPATH is set)
-# If app.py is in root, use 'from src import ...'
-# If running with `streamlit run src/app.py`, use relative imports or adjust sys.path
+# --- Flask App Setup ---
+def create_app():
+    app = Flask(__name__)
+    app.config["SECRET_KEY"] = os.urandom(24) # Needed for session/flash potentially
+    app.config["REDIS_URL"] = config.CELERY_BROKER_URL # Flask-SSE uses Redis
+    app.register_blueprint(sse, url_prefix='/stream') # Register SSE blueprint
+    
+    # Ensure necessary directories exist
+    os.makedirs(config.OUTPUT_DIR, exist_ok=True)
+    os.makedirs(config.INPUT_CSV_DIR, exist_ok=True) # For temp uploads if needed
+    os.makedirs(config.ARCHIVE_DIR, exist_ok=True)
+    db_manager.initialize_database(config.DATABASE_FILE)
+    prompt_manager.load_prompts()
 
-# TEMPORARY: Add src to path for dev run from root `streamlit run app.py`
-import sys
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), 'src')))
-try:
-    from src import config
-    from src import db_manager
-    from src import prompt_manager
-    from src import translation_service
-    # Ensure API clients are initialized if needed by config
-    from src import api_clients 
-except ImportError as e:
-    st.error(f"Failed to import backend modules: {e}. Ensure PYTHONPATH is set or run from root.")
-    st.stop()
+    @app.route('/')
+    def index():
+        """Main dashboard page."""
+        return render_template('index.html')
 
-# Initialize session state variables
-if 'current_batch_id' not in st.session_state:
-    st.session_state['current_batch_id'] = None
-if 'processing_thread' not in st.session_state:
-    st.session_state['processing_thread'] = None
-if 'batch_status' not in st.session_state:
-    st.session_state['batch_status'] = 'idle' # idle, preparing, processing, completed, failed
-if 'export_data' not in st.session_state:
-    st.session_state['export_data'] = None
-if 'export_filename' not in st.session_state:
-    st.session_state['export_filename'] = None
-
-st.set_page_config(layout="wide")
-st.title("SMITE 2 Translation Helper")
-
-# --- Helper Functions --- #
-def get_valid_languages(uploaded_file):
-    """Determines valid languages based on file columns, config, and loaded prompts."""
-    valid_languages = []
-    if not uploaded_file:
-        return []
-        
-    try:
-        # Read just the header
-        # Save temporary copy to read header
-        temp_dir = "temp_uploads"
-        os.makedirs(temp_dir, exist_ok=True)
-        temp_file_path = os.path.join(temp_dir, f"temp_header_{uploaded_file.name}")
-        with open(temp_file_path, "wb") as f:
-            f.write(uploaded_file.getbuffer())
+    @app.route('/start_job', methods=['POST'])
+    def start_job():
+        """Endpoint to start a new translation batch."""
+        logger.info("Received request to /start_job")
+        # Extract data from the POST request (form data or JSON)
+        # This depends on how the frontend JS sends it
+        try:
+            if 'file' not in request.files:
+                return jsonify({"error": "No file part"}), 400
+            file = request.files['file']
+            if file.filename == '':
+                return jsonify({"error": "No selected file"}), 400
             
-        df_header = pd.read_csv(temp_file_path, nrows=0)
-        os.remove(temp_file_path) # Clean up temp file
-        
-        header = df_header.columns.tolist()
-        logger.info(f"Input file header: {header}")
-        
-        potential_langs = set()
-        for col in header:
-            if col.startswith("tg_"):
-                potential_langs.add(col[3:]) # Add the code, e.g., "esLA"
-        
-        logger.info(f"Potential languages from file: {potential_langs}")
-        logger.info(f"Languages configured in .env: {config.AVAILABLE_LANGUAGES}")
-        logger.info(f"Languages with loaded prompts: {list(prompt_manager.stage1_templates.keys())}")
+            # TODO: Get selected languages, mode, api config from request.form
+            selected_languages = request.form.getlist('languages[]') # Example if sent as list
+            mode = request.form.get('mode', 'ONE_STAGE')
+            # ... extract other config ...
+            
+            if not selected_languages:
+                 return jsonify({"error": "No languages selected"}), 400
 
-        # Find intersection
-        for lang_code in config.AVAILABLE_LANGUAGES:
-            if lang_code in potential_langs and lang_code in prompt_manager.stage1_templates:
-                valid_languages.append(lang_code)
+            # Save file temporarily (safer than using filename directly)
+            temp_dir = "temp_uploads"
+            os.makedirs(temp_dir, exist_ok=True)
+            temp_filename = f"{uuid.uuid4()}_{file.filename}"
+            file_path = os.path.join(temp_dir, temp_filename)
+            file.save(file_path)
+            logger.info(f"Temporarily saved uploaded file to {file_path}")
+            
+            # Construct mode_config dictionary (as done in Streamlit app)
+            mode_config = {"mode": mode, "languages": selected_languages, # Add API/Model config here 
+                          "s1_api": request.form.get('s1_api'), # ... etc
+                          }
+                          
+            # Call backend prepare_batch
+            batch_id = translation_service.prepare_batch(file_path, selected_languages, mode_config)
+
+            if batch_id:
+                logger.info(f"Batch {batch_id} prepared. Triggering Celery task...")
+                # Trigger Celery task (assuming tasks.py and celery_app exist)
+                try:
+                    from tasks import run_translation_batch_task # Import celery task
+                    run_translation_batch_task.delay(batch_id) # Asynchronous call
+                    # Return success and batch_id to UI
+                    return jsonify({"message": "Job started successfully", "batch_id": batch_id}), 200
+                except ImportError:
+                     logger.error("Could not import Celery task. Is Celery worker configured?", exc_info=True)
+                     return jsonify({"error": "Failed to trigger background task."}), 500
+                except Exception as e:
+                     logger.error(f"Error triggering Celery task: {e}", exc_info=True)
+                     # Update batch status to failed?
+                     db_manager.update_batch_status(config.DATABASE_FILE, batch_id, 'failed')
+                     return jsonify({"error": "Failed to trigger background task."}), 500
+            else:
+                logger.error("Batch preparation failed.")
+                return jsonify({"error": "Batch preparation failed."}), 500
                 
-        logger.info(f"Valid languages for selection: {valid_languages}")
+        except Exception as e:
+             logger.error(f"Error in /start_job: {e}", exc_info=True)
+             return jsonify({"error": "An unexpected error occurred."}), 500
+             
+    # Placeholder for other routes: /status, /results, /rules, /export
+    @app.route('/placeholder')
+    def placeholder():
+        return "Route not implemented yet."
         
-    except Exception as e:
-        st.error(f"Error reading CSV header: {e}")
-        logger.error(f"Error reading CSV header: {e}")
-        return []
-        
-    return sorted(valid_languages)
+    return app
 
-# --- UI Sections ---
-st.header("1. Upload & Configure")
-
-uploaded_file = st.file_uploader("Upload Input CSV File", type=["csv"])
-
-if uploaded_file:
-    st.success(f"Uploaded: {uploaded_file.name}")
-    # Get valid languages based on the uploaded file
-    valid_languages_for_ui = get_valid_languages(uploaded_file)
-    
-    if not valid_languages_for_ui:
-        st.warning("No translatable languages found based on file columns, .env configuration, and available prompt files. Please check your input file and setup.")
-        st.stop()
-else:
-    st.info("Please upload a CSV file to begin.")
-    st.stop()
-
-# Language Selection (Dynamic)
-st.subheader("Select Languages")
-select_all = st.checkbox("Select All Valid Languages")
-if select_all:
-    selected_languages = st.multiselect(
-        "Languages to Translate", 
-        valid_languages_for_ui, 
-        default=valid_languages_for_ui, # Select all by default if checkbox is ticked
-        key="lang_multiselect"
-    )
-else:
-    selected_languages = st.multiselect(
-        "Languages to Translate", 
-        valid_languages_for_ui,
-        default=None, # No default selection if checkbox is not ticked
-        key="lang_multiselect"
-    )
-
-# Mode & API Configuration
-st.subheader("Configuration")
-col1, col2 = st.columns(2)
-
-with col1:
-    mode = st.radio(
-        "Translation Mode",
-        options=config.VALID_TRANSLATION_MODES, 
-        index=config.VALID_TRANSLATION_MODES.index(config.TRANSLATION_MODE), # Set default from config
-        key="translation_mode"
-    )
-
-with col2:
-    st.write("API Configuration")
-    # Store API selections directly in session state via keys
-    if mode == "ONE_STAGE":
-        one_stage_api = st.selectbox(
-            "API for Translation", 
-            options=config.VALID_APIS,
-            index=config.VALID_APIS.index(config.DEFAULT_API),
-            key="one_stage_api" # Key for session state
-        )
-        # Get default model for the selected API
-        api_default_model = getattr(config, f"{one_stage_api}_MODEL", "")
-        st.text_input(
-            "Model Override (Optional)", 
-            key="one_stage_model_override", # Key for session state
-            placeholder=f"Default: {api_default_model}"
-        )
-        # Ensure stage-specific keys are None if mode is ONE_STAGE
-        st.session_state.s1_api = None
-        st.session_state.s2_api = None
-        st.session_state.s3_api = None
-        st.session_state.s1_model_override = None
-        st.session_state.s2_model_override = None
-        st.session_state.s3_model_override = None
-
-    elif mode == "THREE_STAGE":
-        s1_api_default_index = config.VALID_APIS.index(config.STAGE1_API) if config.STAGE1_API in config.VALID_APIS else 0
-        s1_api = st.selectbox("Stage 1 API (Translate)", options=config.VALID_APIS, index=s1_api_default_index, key="s1_api")
-        s1_default_model = getattr(config, f"{s1_api}_MODEL", "")
-        st.text_input("S1 Model Override", key="s1_model_override", placeholder=f"Default: {s1_default_model}")
-        
-        s2_api_default_index = config.VALID_APIS.index(config.STAGE2_API) if config.STAGE2_API in config.VALID_APIS else 0
-        s2_api = st.selectbox("Stage 2 API (Evaluate)", options=config.VALID_APIS, index=s2_api_default_index, key="s2_api")
-        s2_default_model = getattr(config, f"{s2_api}_MODEL", "")
-        st.text_input("S2 Model Override", key="s2_model_override", placeholder=f"Default: {s2_default_model}")
-
-        s3_api_default_index = config.VALID_APIS.index(config.STAGE3_API) if config.STAGE3_API in config.VALID_APIS else 0
-        s3_api = st.selectbox("Stage 3 API (Refine)", options=config.VALID_APIS, index=s3_api_default_index, key="s3_api")
-        s3_default_model = getattr(config, f"{s3_api}_MODEL", "")
-        st.text_input("S3 Model Override", key="s3_model_override", placeholder=f"Default: {s3_default_model}")
-        
-        # Ensure one-stage keys are None
-        st.session_state.one_stage_api = None
-        st.session_state.one_stage_model_override = None
-
-# --- Job Control & Monitoring --- #
-st.header("2. Run Translation")
-
-def run_translation_thread(file_path, selected_langs, mode_config):
-    """Target function for the background processing thread.
-       Only updates session state with *final* results/status before exiting."""
-    batch_id_local = None
-    processed_data_local = None
-    success_local = False
-    final_status_local = 'failed' # Default to failed
-    try:
-        logger.info(f"THREAD {threading.get_ident()}: Background thread started.")
-        # Initial status ('preparing') is visible in UI via callback trigger
-        
-        # 1. Prepare Batch
-        logger.info(f"THREAD {threading.get_ident()}: Calling prepare_batch...")
-        batch_id_local = translation_service.prepare_batch(file_path, selected_langs, mode_config)
-        # DO NOT update st.session_state['batch_status'] here
-        
-        if batch_id_local:
-            st.session_state['current_batch_id'] = batch_id_local # Store ID for UI display
-            logger.info(f"THREAD {threading.get_ident()}: Prepare batch SUCCESS. Batch ID: {batch_id_local}.")
-            
-            # Get clients 
-            openai_client_thread = api_clients.get_openai_client()
-            
-            # 2. Process Batch 
-            logger.info(f"THREAD {threading.get_ident()}: Calling process_batch for {batch_id_local}...")
-            processed_data_local, success_local = translation_service.process_batch(
-                batch_id_local, 
-                openai_client_obj=openai_client_thread 
-            )
-            logger.info(f"THREAD {threading.get_ident()}: process_batch finished. Success: {success_local}")
-            final_status_local = 'completed' if success_local else 'completed_with_errors'
-
-        else:
-            logger.error(f"THREAD {threading.get_ident()}: Batch preparation failed.")
-            final_status_local = 'failed'
-
-    except Exception as e:
-        logger.exception(f"THREAD {threading.get_ident()}: Critical error during background thread for batch {batch_id_local or 'UNKNOWN'}: {e}")
-        final_status_local = 'failed'
-        # Update DB status if possible
-        if batch_id_local:
-            try: db_manager.update_batch_status(config.DATABASE_FILE, batch_id_local, 'failed')
-            except Exception as db_e: logger.error(f"Failed to update batch status to failed in DB: {db_e}")
-    finally:
-        # --- Update session state ONLY AT THE END --- 
-        logger.info(f"THREAD {threading.get_ident()}: Background thread finished. Final Status: {final_status_local}")
-        st.session_state['batch_status'] = final_status_local
-        st.session_state['export_data'] = processed_data_local
-        # Set filename based on final status
-        if batch_id_local: 
-            try:
-                orig_filename = uploaded_file.name if uploaded_file else "unknown_file"
-            except NameError: # uploaded_file might not be in this thread's scope
-                 orig_filename = db_manager.get_batch_info(config.DATABASE_FILE, batch_id_local)['upload_filename'] or "unknown_file"
-            base_name = os.path.splitext(orig_filename)[0]
-            api_name = mode_config.get('default_api', 'unknown').lower()
-            error_suffix = '_ERRORS' if final_status_local != 'completed' else ''
-            st.session_state['export_filename'] = f"output_{base_name}_{api_name}_batch_{batch_id_local[:8]}{error_suffix}.csv"
-        else: # If prepare_batch failed
-             st.session_state['export_filename'] = "output_failed_batch.csv"
-        # Let the main thread detect completion and trigger rerun via the polling loop
-
-# --- Callback Function --- #
-def start_translation_job_callback():
-    logger.info("CALLBACK: start_translation_job_callback executing...")
-    if not selected_languages: # Access selected_languages from the outer scope
-        st.warning("Please select at least one language to translate.")
-        return # Stop callback execution
-        
-    if not uploaded_file: # Access uploaded_file from outer scope
-        st.warning("File upload seems to have been lost. Please re-upload.")
-        return # Stop callback execution
-        
-    # Save uploaded file temporarily
-    temp_dir = "temp_uploads"
-    os.makedirs(temp_dir, exist_ok=True)
-    temp_file_name = f"{uuid.uuid4()}_{uploaded_file.name}"
-    file_path = os.path.join(temp_dir, temp_file_name)
-    try:
-        with open(file_path, "wb") as f:
-            f.write(uploaded_file.getbuffer())
-        logger.info(f"Saved uploaded file temporarily to: {file_path}")
-    except Exception as e:
-        st.error(f"Failed to save uploaded file: {e}")
-        logger.error(f"Failed to save uploaded file: {e}")
-        return
-
-    # Collect config from UI state
-    mode = st.session_state.translation_mode
-    if mode == "ONE_STAGE":
-        final_mode_config = {
-            "mode": mode,
-            "default_api": st.session_state.one_stage_api,
-            "one_stage_model": st.session_state.one_stage_model_override or None, 
-            "s1_api": st.session_state.one_stage_api, "s1_model": st.session_state.one_stage_model_override or None,
-            "s2_api": None, "s2_model": None,
-            "s3_api": None, "s3_model": None,
-        }
-    else: # THREE_STAGE
-         final_mode_config = {
-            "mode": mode,
-            "default_api": config.DEFAULT_API,
-            "s1_api": st.session_state.s1_api,
-            "s2_api": st.session_state.s2_api,
-            "s3_api": st.session_state.s3_api,
-            "s1_model": st.session_state.s1_model_override or None, 
-            "s2_model": st.session_state.s2_model_override or None,
-            "s3_model": st.session_state.s3_model_override or None,
-        }
-    
-    logger.info(f"Starting job with config: {final_mode_config}")
-
-    # Start background thread
-    thread = threading.Thread(
-        target=run_translation_thread, 
-        args=(file_path, selected_languages, final_mode_config) 
-    )
-    st.session_state['processing_thread'] = thread
-    logger.info("CALLBACK: Setting initial status to 'preparing'...")
-    st.session_state['batch_status'] = 'preparing' 
-    st.session_state['current_batch_id'] = None # Clear previous batch ID
-    st.session_state['export_data'] = None 
-    st.session_state['export_filename'] = None
-    thread.start()
-    logger.info("CALLBACK: Background thread started and callback finished.")
-    # No rerun here, let main script handle it
-
-# --- Button --- #
-# Disable button if processing
-disable_start = st.session_state['batch_status'] in ['preparing', 'processing']
-st.button(
-    "Start Translation Job", 
-    disabled=disable_start, 
-    on_click=start_translation_job_callback # Attach the callback
-)
-
-# --- Status Display & Refresh Loop --- #
-
-# Read status and check if a thread object exists and is alive
-current_status = st.session_state.get('batch_status', 'idle')
-processing_thread = st.session_state.get('processing_thread', None)
-is_processing = processing_thread is not None and processing_thread.is_alive()
-
-logger.info(f"UI RERUN: Reading status='{current_status}', is_processing={is_processing}")
-
-# Display Status / Progress
-if current_status == 'preparing' or is_processing:
-    # Show spinner if preparing OR if thread is still alive (processing)
-    status_message = "Processing..." if is_processing else "Preparing batch..."
-    spinner_message = "Translating..." if is_processing else "Preparing..."
-    st.info(f"{status_message} (Batch: {st.session_state.get('current_batch_id', 'N/A')})" )
-    with st.spinner(spinner_message): pass
-elif current_status == 'completed':
-    st.success(f"Batch {st.session_state.get('current_batch_id', 'N/A')} completed successfully!")
-elif current_status == 'completed_with_errors':
-    st.warning(f"Batch {st.session_state.get('current_batch_id', 'N/A')} completed with errors. Check logs and Audit file.")
-elif current_status == 'failed':
-    st.error(f"Batch {st.session_state.get('current_batch_id', 'N/A')} preparation or processing failed. Check logs.")
-
-# Refresh Logic: Only rerun if a thread is *currently* alive 
-# OR if the status is 'preparing' (meaning the thread was just launched)
-if is_processing or current_status == 'preparing':
-    sleep_duration = 2 
-    logger.info(f"UI REFRESH: Job active (status='{current_status}', is_processing={is_processing}). Sleeping {sleep_duration}s and queueing rerun.")
-    time.sleep(sleep_duration) 
-    st.rerun()
-else:
-    # If not processing and not preparing, clear the thread object if it exists
-    if st.session_state.get('processing_thread') is not None:
-         logger.info("UI REFRESH: Job inactive. Clearing thread object from session state.")
-         st.session_state['processing_thread'] = None
-
-# --- Export --- #
-st.header("3. Export Results")
-
-enable_download = st.session_state['batch_status'] in ['completed', 'completed_with_errors'] and st.session_state['export_data'] is not None
-
-if enable_download:
-    try:
-        # Ensure export_data is a list of dicts
-        if isinstance(st.session_state['export_data'], list) and len(st.session_state['export_data']) > 0:
-            df = pd.DataFrame(st.session_state['export_data'])
-            
-            # Attempt to reconstruct header order (Source, Metadata sorted, Targets sorted)
-            # This might not match original input exactly
-            all_columns = set(df.columns)
-            source_col = config.SOURCE_COLUMN
-            metadata_cols = sorted([c for c in all_columns if not c.startswith("tg_") and c != source_col])
-            target_cols = sorted([c for c in all_columns if c.startswith("tg_")])
-            ordered_header = [source_col] + metadata_cols + target_cols
-            
-            # Reindex DataFrame columns
-            df_ordered = df[ordered_header]
-            
-            csv_data = df_ordered.to_csv(index=False).encode('utf-8')
-            
-            st.download_button(
-                label="Download Output CSV",
-                data=csv_data,
-                file_name=st.session_state.get('export_filename', 'translation_output.csv'), # Use filename set by thread
-                mime='text/csv',
-            )
-        elif isinstance(st.session_state['export_data'], list) and len(st.session_state['export_data']) == 0:
-            st.info("Processing resulted in no data to export.")
-        else:
-             st.error("Export data is in an unexpected format.")
-             logger.error(f"Export data type mismatch: {type(st.session_state['export_data'])}")
-
-    except Exception as e:
-        st.error(f"Failed to prepare data for download: {e}")
-        logger.exception("Error preparing download data:")
-else:
-    st.info("Complete a translation job to enable export.")
-
-
-# --- TODO Sections --- #
-# - Results Review/Edit
-# - Rules Editor
+# Allow running directly for development
+if __name__ == '__main__':
+    app = create_app()
+    # Note: Flask's dev server is not suitable for production.
+    # Use Waitress or Gunicorn/uWSGI + Nginx for deployment.
+    # Debug mode enables auto-reloading.
+    app.run(debug=True, threaded=False) # Set threaded=False for easier SSE/Celery debug initially

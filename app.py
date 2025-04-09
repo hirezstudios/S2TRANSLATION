@@ -12,6 +12,7 @@ from src import config
 from src import db_manager
 from src import translation_service
 from src import prompt_manager
+from src import api_clients
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(name)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -378,6 +379,91 @@ def create_app():
         except Exception as e:
             logger.exception(f"Error updating review status for task {task_id}: {e}")
             return jsonify({"error": "An internal error occurred while saving the review."}), 500
+
+    @app.route('/retranslate_task/<int:task_id>', methods=['POST'])
+    def retranslate_task(task_id):
+        """Handles request to re-translate a specific task with user guidance."""
+        logger.info(f"Received re-translate request for task_id: {task_id}")
+        db_path = config.DATABASE_FILE
+        try:
+            data = request.get_json()
+            if not data or 'refinement_prompt' not in data:
+                return jsonify({"error": "Invalid request body, missing 'refinement_prompt'"}), 400
+            
+            refinement_instruction = data.get('refinement_prompt').strip()
+            if not refinement_instruction:
+                return jsonify({"error": "Refinement instruction cannot be empty"}), 400
+
+            # 1. Fetch current task data
+            conn = db_manager.get_db_connection(db_path)
+            task_info = conn.execute("SELECT * FROM TranslationTasks WHERE task_id = ?", (task_id,)).fetchone()
+            conn.close()
+            if not task_info:
+                return jsonify({"error": "Task not found"}), 404
+                
+            lang_code = task_info['language_code']
+            source_text = task_info['source_text']
+            # Use approved_translation if available and not empty, otherwise use LLM final
+            current_translation = task_info['approved_translation'] or task_info['final_translation'] or ""
+            
+            # 2. Construct re-translate prompt
+            # Load template (requires prompt_manager update)
+            retranslate_prompt_template = prompt_manager.load_single_prompt_file(config.STAGE4_TEMPLATE_FILE) # Need STAGE4 path in config
+            if not retranslate_prompt_template:
+                 return jsonify({"error": "Retranslate prompt template not found"}), 500
+                 
+            # Get full ruleset
+            lang_specific_part = prompt_manager.stage1_templates.get(lang_code)
+            if not lang_specific_part: raise ValueError(f"Lang specific prompt for {lang_code} missing")
+            lang_name = config.LANGUAGE_NAME_MAP.get(lang_code, lang_code)
+            lang_specific_part = lang_specific_part.replace("<<TARGET_LANGUAGE_NAME>>", lang_name)
+            full_ruleset_prompt = f"{lang_specific_part}\n\n{prompt_manager.global_rules_content}"
+            
+            final_instruction = "\n\n**IMPORTANT FINAL INSTRUCTION:..." # Add instruction
+
+            system_prompt = retranslate_prompt_template.replace("<<TARGET_LANGUAGE_NAME>>", lang_name)\
+                                                       .replace("<<RULES>>", full_ruleset_prompt)\
+                                                       .replace("<<SOURCE_TEXT>>", source_text or "")\
+                                                       .replace("<<CURRENT_TRANSLATION>>", current_translation)\
+                                                       .replace("<<REFINEMENT_INSTRUCTION>>", refinement_instruction)
+            system_prompt += final_instruction
+
+            # 3. Determine API/Model (Use batch defaults for now)
+            batch_info = db_manager.get_batch_info(db_path, task_info['batch_id'])
+            api_to_use = config.DEFAULT_API
+            model_to_use = None # Default model
+            if batch_info and batch_info['config_details']:
+                try:
+                    batch_config = json.loads(batch_info['config_details'])
+                    # Use S3 API/Model config from batch if available? Or S1? Let's use S1 for re-translate.
+                    api_to_use = batch_config.get('s1_api', config.DEFAULT_API)
+                    model_to_use = batch_config.get('s1_model')
+                except Exception:
+                    logger.warning(f"Could not parse batch config for retranslate API selection, using defaults.")
+
+            # 4. Call API
+            openai_client_obj = api_clients.get_openai_client() # Get client if needed
+            new_translation = translation_service.call_active_api(
+                api_to_use, system_prompt, 
+                "Apply the refinement instruction.", # Simple user content
+                row_identifier=f"{task_id}-RETRANSLATE", 
+                model_override=model_to_use,
+                openai_client_obj=openai_client_obj
+            )
+
+            # 5. Update DB and respond
+            if new_translation is not None and not new_translation.startswith("ERROR:BLOCKED:"):
+                new_review_status = 'approved_edited'
+                db_manager.update_review_status(db_path, task_id, new_review_status, new_translation, "webapp_retranslate")
+                return jsonify({"success": True, "new_translation": new_translation, "new_status": new_review_status}), 200
+            else:
+                error_msg = new_translation or "Retranslate API call failed"
+                logger.error(f"Retranslate failed for task {task_id}: {error_msg}")
+                return jsonify({"error": error_msg}), 500
+
+        except Exception as e:
+            logger.exception(f"Error retranslating task {task_id}: {e}")
+            return jsonify({"error": "An internal error occurred during re-translation."}), 500
 
     # Placeholder for other routes: /rules
     @app.route('/placeholder')

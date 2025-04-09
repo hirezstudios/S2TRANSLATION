@@ -36,6 +36,7 @@ STAGE3_MODEL_OVERRIDE = os.getenv("STAGE3_MODEL", "").split('#')[0].strip().stri
 STAGE1_PROMPT_FILE_TPL = "system_prompts/tg_{lang_code}.md" # Template path
 STAGE2_TEMPLATE_FILE = "system_prompts/stage2_evaluate_template.md" 
 STAGE3_TEMPLATE_FILE = "system_prompts/stage3_refine_template.md" 
+STAGE4_TEMPLATE_FILE = "system_prompts/stage4_retranslate_template.md"
 
 # --- CSV/DB Configuration ---
 INPUT_CSV_DIR = "input/" # Base directory for inputs

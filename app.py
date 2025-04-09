@@ -225,7 +225,7 @@ def run_translation_thread(file_path, selected_langs, mode_config):
     finally:
         # Clean up thread object in session state?
         # st.session_state['processing_thread'] = None # Careful with race conditions
-        st.experimental_rerun() # Trigger UI update
+        st.rerun() # Use current rerun API
 
 # Disable button if processing
 disable_start = st.session_state['batch_status'] in ['preparing', 'processing']
@@ -280,7 +280,7 @@ if st.button("Start Translation Job", disabled=disable_start):
         st.session_state['export_data'] = None # Clear previous export data
         st.session_state['export_filename'] = None
         thread.start()
-        st.experimental_rerun() # Rerun to update UI (show spinner etc.)
+        st.rerun() # Use current rerun API
 
 # Display Status / Progress
 if st.session_state['batch_status'] == 'preparing':

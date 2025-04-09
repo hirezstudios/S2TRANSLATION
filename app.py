@@ -191,8 +191,15 @@ def create_app():
             batch_info = db_manager.get_batch_info(db_path, batch_id)
             if not batch_info:
                 return jsonify({"error": "Batch not found"}), 404
-                
-            batch_status = batch_info['status'] 
+            batch_status_db = batch_info['status'] 
+            # Get mode from config details
+            mode = "UNKNOWN"
+            try:
+                 if batch_info['config_details']:
+                     batch_config = json.loads(batch_info['config_details'])
+                     mode = batch_config.get('mode', 'UNKNOWN')
+            except Exception:
+                 logger.warning(f"Could not determine mode from config for batch {batch_id}")
             
             # Use count function for efficiency
             total_tasks = db_manager.count_tasks_for_batch(db_path, batch_id)
@@ -206,7 +213,8 @@ def create_app():
 
             return jsonify({
                 "batch_id": batch_id,
-                "batch_status": batch_status,
+                "batch_status": batch_status_db, # Use specific name
+                "mode": mode, # Add mode to response
                 "total_tasks": total_tasks,
                 "completed_tasks": completed_tasks,
                 "error_tasks": error_tasks
@@ -252,6 +260,47 @@ def create_app():
         except Exception as e:
             logger.exception(f"Error during export for batch {batch_id}: {e}") # Use exception
             return jsonify({"error": "An unexpected error occurred during export."}), 500
+            
+    @app.route('/export_stages/<batch_id>')
+    def export_stages_report(batch_id):
+        """Generates and returns the detailed stages CSV report."""
+        logger.info(f"Received stages report export request for batch {batch_id}")
+        db_path = config.DATABASE_FILE
+        try:
+            # Check batch exists and was THREE_STAGE
+            batch_info = db_manager.get_batch_info(db_path, batch_id)
+            if not batch_info:
+                return jsonify({"error": "Batch not found"}), 404
+            if batch_info['config_details']:
+                 try:
+                     batch_config = json.loads(batch_info['config_details'])
+                     if batch_config.get('mode') != 'THREE_STAGE':
+                         return jsonify({"error": "Stages report only available for THREE_STAGE batches"}), 400
+                 except Exception:
+                     pass # Ignore config parsing error here, generate_stages_report will handle it
+            
+            # Define report filename
+            original_filename = batch_info['upload_filename'] or "unknown_file.csv"
+            base_name = os.path.splitext(original_filename)[0]
+            report_filename = f"stages_report_{base_name}_batch_{batch_id[:8]}.csv"
+            report_file_path = os.path.join(config.OUTPUT_DIR, report_filename)
+            
+            # Ensure output directory exists
+            os.makedirs(config.OUTPUT_DIR, exist_ok=True)
+            
+            success = translation_service.generate_stages_report(batch_id, report_file_path)
+
+            if success and os.path.exists(report_file_path):
+                abs_report_path = os.path.abspath(report_file_path)
+                logger.info(f"Sending stages report file: {abs_report_path}")
+                return send_file(abs_report_path, as_attachment=True, download_name=report_filename)
+            else:
+                 # generate_stages_report logs specific errors
+                 return jsonify({"error": "Failed to generate stages report file."}), 500
+
+        except Exception as e:
+            logger.exception(f"Error during stages report export for batch {batch_id}: {e}")
+            return jsonify({"error": "An unexpected error occurred during stages report export."}), 500
             
     # Placeholder for other routes: /results, /rules
     @app.route('/placeholder')

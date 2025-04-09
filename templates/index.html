@@ -293,14 +293,27 @@
         
         setStatus(statusText, alertClass);
 
-        // Add download button on completion
-        if ((data.batch_status === 'completed' || data.batch_status === 'completed_with_errors') && data.total_tasks > 0) {
-             exportArea.innerHTML = ''; // Clear previous
+        // Add download button(s) on completion
+        exportArea.innerHTML = ''; // Clear previous links
+        const isComplete = (data.batch_status === 'completed' || data.batch_status === 'completed_with_errors');
+        const hasTasks = data.total_tasks > 0;
+
+        if (isComplete && hasTasks) {
+             // Add standard export link
              const downloadLink = document.createElement('a');
              downloadLink.href = `/export/${data.batch_id}`;
              downloadLink.textContent = 'Download Output CSV';
-             downloadLink.classList.add('btn', 'btn-success');
+             downloadLink.classList.add('btn', 'btn-success', 'me-2'); // Add margin
              exportArea.appendChild(downloadLink);
+
+             // Add stages report link *only if* batch mode was THREE_STAGE
+             if (data.mode === 'THREE_STAGE') { // Use mode from status response
+                 const stagesLink = document.createElement('a');
+                 stagesLink.href = `/export_stages/${data.batch_id}`;
+                 stagesLink.textContent = 'Download Stages Report';
+                 stagesLink.classList.add('btn', 'btn-info');
+                 exportArea.appendChild(stagesLink);
+             }
         }
     }
 

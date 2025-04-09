@@ -871,6 +871,81 @@ def generate_export(batch_id, output_file_path):
         logger.error(f"Error writing export file {output_file_path}: {e}")
         return False
 
+def generate_stages_report(batch_id, output_file_path):
+    """Generates a detailed CSV report showing results from each stage for THREE_STAGE mode."""
+    logger.info(f"Generating detailed stages report for batch {batch_id} to {output_file_path}")
+    db_path = config.DATABASE_FILE
+    
+    # Check if batch was actually run in three-stage mode?
+    batch_info = db_manager.get_batch_info(db_path, batch_id)
+    if not batch_info or not batch_info['config_details']:
+        logger.error(f"Cannot generate stages report: Batch info not found for {batch_id}")
+        return False
+    try:
+        batch_config = json.loads(batch_info['config_details'])
+        if batch_config.get('mode') != 'THREE_STAGE':
+            logger.warning(f"Skipping stages report for batch {batch_id}: Was not run in THREE_STAGE mode.")
+            # Or should we generate it anyway? Let's skip for now.
+            return False 
+    except Exception as e:
+         logger.error(f"Cannot generate stages report: Error reading batch config for {batch_id} - {e}")
+         return False
+
+    # Fetch all task data for the batch
+    conn = db_manager.get_db_connection(db_path)
+    try:
+        cursor = conn.execute("""
+            SELECT task_id, row_index_in_file, language_code, source_text, 
+                   initial_translation, evaluation_score, evaluation_feedback, 
+                   final_translation, status, error_message
+            FROM TranslationTasks 
+            WHERE batch_id = ? 
+            ORDER BY row_index_in_file ASC, language_code ASC
+            """, (batch_id,))
+        tasks = cursor.fetchall()
+    except Exception as e:
+        logger.error(f"Failed to fetch tasks for stages report (batch {batch_id}): {e}")
+        tasks = []
+    finally:
+        conn.close()
+
+    if not tasks:
+        logger.warning(f"No tasks found for stages report (batch {batch_id})")
+        # Write empty file with header?
+
+    # Define header for the report
+    report_header = [
+        'task_id', 'row_index', 'language', 'source', 
+        'initial_translation', 'eval_score', 'eval_feedback', 
+        'final_translation', 'final_status', 'error'
+    ]
+
+    try:
+        os.makedirs(os.path.dirname(output_file_path), exist_ok=True)
+        with open(output_file_path, 'w', encoding='utf-8', newline='') as outfile:
+            writer = csv.DictWriter(outfile, fieldnames=report_header, extrasaction='ignore')
+            writer.writeheader()
+            for task_row in tasks:
+                # Map DB columns to report header names
+                row_dict = {
+                    'task_id': task_row['task_id'],
+                    'row_index': task_row['row_index_in_file'],
+                    'language': task_row['language_code'],
+                    'source': task_row['source_text'],
+                    'initial_translation': task_row['initial_translation'],
+                    'eval_score': task_row['evaluation_score'],
+                    'eval_feedback': task_row['evaluation_feedback'],
+                    'final_translation': task_row['final_translation'],
+                    'final_status': task_row['status'],
+                    'error': task_row['error_message']
+                }
+                writer.writerow(row_dict)
+        logger.info(f"Stages report generated successfully: {output_file_path}")
+        return True
+    except Exception as e:
+        logger.error(f"Error writing stages report file {output_file_path}: {e}")
+        return False
+
 # --- REMOVED translate_csv and __main__ block ---
 
 # def process_batch(...): ... # Remove this old function

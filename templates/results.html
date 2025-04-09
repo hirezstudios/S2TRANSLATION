@@ -69,8 +69,9 @@
                     headerFilter: "input", 
                     headerFilterPlaceholder:"Filter Source...", 
                     tooltip: true, 
-                    widthGrow:2, 
-                    formatter: "textarea" // Use textarea formatter for wrapping
+                    width: "25%",
+                    formatter: "textarea",
+                    resizable: true
                 },
                 { 
                     title: "LLM Final", 
@@ -78,8 +79,9 @@
                     headerFilter: "input", 
                     headerFilterPlaceholder:"Filter LLM Output...", 
                     tooltip: true, 
-                    widthGrow:3, 
-                    formatter: "textarea" // Use textarea formatter for wrapping
+                    width: "30%",
+                    formatter: "textarea",
+                    resizable: true
                 },
                 {
                     title: "Approved Translation",
@@ -87,12 +89,13 @@
                     headerFilter: "input",
                     headerFilterPlaceholder:"Filter Approved...",
                     tooltip: true,
-                    widthGrow: 3,
+                    width: "30%",
                     editor: "textarea", 
-                    formatter: "textarea", // Use textarea formatter for wrapping
+                    formatter: "textarea", 
+                    resizable: true,
                     editorParams: {
                          verticalNavigation: "hybrid",
-                         elementAttributes:{ maxLength:"5000" } // Limit input length slightly
+                         elementAttributes:{ maxLength:"5000" }
                     },
                     cellEdited: function(cell){
                         // Triggered after a cell is edited and loses focus/Enter pressed
@@ -107,8 +110,9 @@
                     width: 160, hozAlign: "center", 
                     formatter: statusFormatter, 
                     headerFilter: "select", 
-                    headerFilterParams:{values:["", "pending_review", "approved_original", "approved_edited", "denied"], sortValuesList: "asc"}, // Added empty option
-                    headerFilterPlaceholder: "Filter Status..."
+                    headerFilterParams:{values:["", "pending_review", "approved_original", "approved_edited", "denied"], sortValuesList: "asc"},
+                    headerFilterPlaceholder: "Filter Status...",
+                    resizable: false
                 },
                 { 
                     title: "Actions", 

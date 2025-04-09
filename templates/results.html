@@ -58,10 +58,9 @@
         const actionFormatter = function(cell, formatterParams, onRendered){
             const taskId = cell.getRow().getData().task_id;
             const buttons = `
-                <button class="btn btn-sm btn-outline-success me-1" onclick="handleReview(${taskId}, 'approved_original')">Approve Original</button>
                 <button class="btn btn-sm btn-outline-danger" onclick="handleReview(${taskId}, 'denied')">Deny</button>
+                <!-- TODO: Add Re-translate button here later -->
             `;
-            // Approve Edited is handled by cell edit callback
             return buttons;
         };
 
@@ -112,13 +111,13 @@
                          elementAttributes:{ maxLength:"5000" }
                     },
                     cellEdited: function(cell){
-                        // Triggered after a cell is edited and loses focus/Enter pressed
                         const taskId = cell.getRow().getData().task_id;
                         const newValue = cell.getValue();
+                        // Also set status to 'approved_edited' when text is changed
                         handleReview(taskId, 'approved_edited', newValue);
                     }
                 },
-                { 
+                {
                     title: "Review Status", 
                     field: "review_status", 
                     width: 160, hozAlign: "center", 
@@ -126,7 +125,33 @@
                     headerFilter: "select", 
                     headerFilterParams:{values:["", "pending_review", "approved_original", "approved_edited", "denied"], sortValuesList: "asc"},
                     headerFilterPlaceholder: "Filter Status...",
-                    resizable: false
+                    resizable: false,
+                    editor: "list",
+                    editorParams: {
+                        values: {
+                           "pending_review": "Pending Review",
+                           "approved_original": "Approved Original", 
+                           "approved_edited": "Approved Edited",
+                           "denied": "Denied"
+                        },
+                        clearable: false,
+                        listOnEmpty: true,
+                    },
+                    cellEdited: function(cell){
+                        // Triggered when status is changed via dropdown
+                        const taskId = cell.getRow().getData().task_id;
+                        const newStatus = cell.getValue();
+                        let approvedText = null;
+                        // If setting back to an approved state, use current approved text
+                        if (newStatus.startsWith('approved')) {
+                             approvedText = cell.getRow().getData().approved_translation;
+                             // If original text doesn't exist (e.g. previously denied), maybe use LLM final?
+                             if (approvedText === null) {
+                                 approvedText = cell.getRow().getData().final_translation;
+                             }
+                        }
+                        handleReview(taskId, newStatus, approvedText);
+                    }
                 },
                 { 
                     title: "Actions", 
@@ -142,7 +167,7 @@
             ]
         });
 
-        // Function to handle review actions (Approve Original / Deny / Save Edit)
+        // Function to handle review actions
         window.handleReview = async function(taskId, status, approvedText = null) {
             console.log(`Handling review for task ${taskId}: status=${status}`);
             let payload = { 

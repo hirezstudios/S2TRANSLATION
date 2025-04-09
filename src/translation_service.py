@@ -740,12 +740,12 @@ def run_batch_background(batch_id):
     # This function doesn't need to return data, it just updates the DB
 
 # --- Input Processing --- 
-def prepare_batch(input_file_path, selected_languages, mode_config):
-    """Parses input CSV, stores header, creates DB entries."""
+def prepare_batch(input_file_path, original_filename, selected_languages, mode_config):
+    """Parses input CSV, stores header/filename, creates DB entries."""
     db_path = config.DATABASE_FILE 
     batch_id = str(uuid.uuid4())
-    filename = os.path.basename(input_file_path)
-    logger.info(f"Preparing batch {batch_id} from file: {filename}")
+    # filename = os.path.basename(input_file_path) # Use original_filename for DB record
+    logger.info(f"Preparing batch {batch_id} from file: {original_filename}")
     
     original_header = []
     tasks_to_create = []
@@ -756,7 +756,7 @@ def prepare_batch(input_file_path, selected_languages, mode_config):
             reader = csv.DictReader(infile)
             original_header = reader.fieldnames or []
             if config.SOURCE_COLUMN not in original_header:
-                logger.error(f"Source column '{config.SOURCE_COLUMN}' not found in {filename}")
+                logger.error(f"Source column '{config.SOURCE_COLUMN}' not found in {original_filename}")
                 # Cannot proceed without source column
                 return None 
             
@@ -779,7 +779,7 @@ def prepare_batch(input_file_path, selected_languages, mode_config):
                     elif lang_code not in prompt_manager.stage1_templates:
                          logger.warning(f"Skipping language {lang_code} for row {i}: Lang code not available (missing prompt file?).")
     except Exception as e:
-        logger.exception(f"Error processing input file {filename} for batch {batch_id}: {e}")
+        logger.exception(f"Error processing input file {original_filename} for batch {batch_id}: {e}")
         # Don't create batch record if file processing fails
         return None
 
@@ -792,7 +792,8 @@ def prepare_batch(input_file_path, selected_languages, mode_config):
     # Store config snapshot *including the original header*
     config_snapshot_dict = {**mode_config, "original_header": original_header}
     config_snapshot_json = json.dumps(config_snapshot_dict)
-    db_manager.add_batch(db_path, batch_id, filename, config_snapshot_json)
+    # Use original_filename when adding batch record
+    db_manager.add_batch(db_path, batch_id, original_filename, config_snapshot_json)
         
     logger.info(f"Added {tasks_added} tasks for batch {batch_id}.")
     db_manager.update_batch_status(db_path, batch_id, 'pending') # Mark as ready for processing

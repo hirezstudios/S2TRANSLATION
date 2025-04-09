@@ -187,6 +187,22 @@ def count_tasks_for_batch(db_file_path, batch_id):
     finally:
         conn.close()
 
+def count_tasks_by_status(db_file_path, batch_id, status):
+    """Counts the number of tasks for a batch with a specific status."""
+    conn = get_db_connection(db_file_path)
+    try:
+        # Use LIKE for statuses like 'completed%'
+        status_pattern = status + '%' if status.endswith('%') else status
+        cursor = conn.execute("SELECT COUNT(*) FROM TranslationTasks WHERE batch_id = ? AND status LIKE ?", 
+                            (batch_id, status_pattern))
+        count = cursor.fetchone()[0]
+        return count
+    except sqlite3.Error as e:
+        logger.error(f"Failed to count tasks for batch {batch_id} with status {status}: {e}")
+        return 0 # Return 0 on error
+    finally:
+        conn.close()
+
 def update_batch_status(db_file_path, batch_id, status):
     """Updates the status of a batch."""
     conn = get_db_connection(db_file_path)

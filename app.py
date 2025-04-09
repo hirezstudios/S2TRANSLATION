@@ -187,74 +187,65 @@ st.header("2. Run Translation")
 
 def run_translation_thread(file_path, selected_langs, mode_config):
     """Target function for the background processing thread.
-       Updates session state directly."""
+       Only updates session state with *final* results/status before exiting."""
     batch_id_local = None
+    processed_data_local = None
+    success_local = False
+    final_status_local = 'failed' # Default to failed
     try:
         logger.info(f"THREAD {threading.get_ident()}: Background thread started.")
-        # Initial status ('preparing') is set by the callback
+        # Initial status ('preparing') is visible in UI via callback trigger
         
         # 1. Prepare Batch
         logger.info(f"THREAD {threading.get_ident()}: Calling prepare_batch...")
         batch_id_local = translation_service.prepare_batch(file_path, selected_langs, mode_config)
+        # DO NOT update st.session_state['batch_status'] here
         
         if batch_id_local:
-            st.session_state['current_batch_id'] = batch_id_local
+            st.session_state['current_batch_id'] = batch_id_local # Store ID for UI display
             logger.info(f"THREAD {threading.get_ident()}: Prepare batch SUCCESS. Batch ID: {batch_id_local}.")
-            # Update session state directly
-            logger.info(f"THREAD {threading.get_ident()}: Setting session state status to 'processing'...")
-            st.session_state['batch_status'] = "processing"
-            logger.info(f"THREAD {threading.get_ident()}: Session state status set to 'processing'.")
             
             # Get clients 
             openai_client_thread = api_clients.get_openai_client()
             
             # 2. Process Batch 
             logger.info(f"THREAD {threading.get_ident()}: Calling process_batch for {batch_id_local}...")
-            processed_data, success = translation_service.process_batch(
+            processed_data_local, success_local = translation_service.process_batch(
                 batch_id_local, 
                 openai_client_obj=openai_client_thread 
             )
-            logger.info(f"THREAD {threading.get_ident()}: process_batch finished. Success: {success}")
-            
-            # 3. Update Final Status in session state & store data
-            final_status = 'completed' if success else 'completed_with_errors'
-            st.session_state['export_data'] = processed_data 
-            base_name = os.path.splitext(uploaded_file.name)[0] # uploaded_file might be out of scope here? Need to check.
-            # Let's retrieve original filename from DB maybe?
-            # For now, use a generic name if uploaded_file isn't accessible
-            try:
-                orig_filename = uploaded_file.name if uploaded_file else "unknown_file"
-            except NameError:
-                 orig_filename = "unknown_file"
-                 logger.warning("THREAD: uploaded_file not accessible, using generic export filename.")
-            base_name = os.path.splitext(orig_filename)[0]
-            api_name = mode_config.get('default_api', 'unknown').lower()
-            st.session_state['export_filename'] = f"output_{base_name}_{api_name}_batch_{batch_id_local[:8]}{'_ERRORS' if not success else ''}.csv"
-
-            logger.info(f"THREAD {threading.get_ident()}: Setting final session state status to '{final_status}'...")
-            st.session_state['batch_status'] = final_status
-            logger.info(f"THREAD {threading.get_ident()}: Final session state status set to '{final_status}'.")
+            logger.info(f"THREAD {threading.get_ident()}: process_batch finished. Success: {success_local}")
+            final_status_local = 'completed' if success_local else 'completed_with_errors'
 
         else:
             logger.error(f"THREAD {threading.get_ident()}: Batch preparation failed.")
-            logger.info(f"THREAD {threading.get_ident()}: Setting session state status to 'failed'...")
-            st.session_state['batch_status'] = "failed"
-            logger.info(f"THREAD {threading.get_ident()}: Session state status set to 'failed'.")
+            final_status_local = 'failed'
 
     except Exception as e:
         logger.exception(f"THREAD {threading.get_ident()}: Critical error during background thread for batch {batch_id_local or 'UNKNOWN'}: {e}")
-        logger.info(f"THREAD {threading.get_ident()}: Setting session state status to 'failed' due to exception...")
-        st.session_state['batch_status'] = "failed"
-        logger.info(f"THREAD {threading.get_ident()}: Session state status set to 'failed'.")
+        final_status_local = 'failed'
         # Update DB status if possible
         if batch_id_local:
-            try:
-                db_manager.update_batch_status(config.DATABASE_FILE, batch_id_local, 'failed')
-            except Exception as db_e:
-                logger.error(f"Failed to update batch status to failed in DB: {db_e}")
+            try: db_manager.update_batch_status(config.DATABASE_FILE, batch_id_local, 'failed')
+            except Exception as db_e: logger.error(f"Failed to update batch status to failed in DB: {db_e}")
     finally:
-        logger.info(f"THREAD {threading.get_ident()}: Background thread finished. (No rerun call)")
-        # NO RERUN call here
+        # --- Update session state ONLY AT THE END --- 
+        logger.info(f"THREAD {threading.get_ident()}: Background thread finished. Final Status: {final_status_local}")
+        st.session_state['batch_status'] = final_status_local
+        st.session_state['export_data'] = processed_data_local
+        # Set filename based on final status
+        if batch_id_local: 
+            try:
+                orig_filename = uploaded_file.name if uploaded_file else "unknown_file"
+            except NameError: # uploaded_file might not be in this thread's scope
+                 orig_filename = db_manager.get_batch_info(config.DATABASE_FILE, batch_id_local)['upload_filename'] or "unknown_file"
+            base_name = os.path.splitext(orig_filename)[0]
+            api_name = mode_config.get('default_api', 'unknown').lower()
+            error_suffix = '_ERRORS' if final_status_local != 'completed' else ''
+            st.session_state['export_filename'] = f"output_{base_name}_{api_name}_batch_{batch_id_local[:8]}{error_suffix}.csv"
+        else: # If prepare_batch failed
+             st.session_state['export_filename'] = "output_failed_batch.csv"
+        # Let the main thread detect completion and trigger rerun via the polling loop
 
 # --- Callback Function --- #
 def start_translation_job_callback():
@@ -314,14 +305,12 @@ def start_translation_job_callback():
     st.session_state['processing_thread'] = thread
     logger.info("CALLBACK: Setting initial status to 'preparing'...")
     st.session_state['batch_status'] = 'preparing' 
-    st.session_state['current_batch_id'] = None # Clear old batch ID
-    logger.info("CALLBACK: Status set to 'preparing'.")
+    st.session_state['current_batch_id'] = None # Clear previous batch ID
     st.session_state['export_data'] = None 
     st.session_state['export_filename'] = None
     thread.start()
-    logger.info("CALLBACK: Background translation thread started.")
-    logger.info("CALLBACK: start_translation_job_callback finished.")
-    # Streamlit reruns automatically after callback finishes
+    logger.info("CALLBACK: Background thread started and callback finished.")
+    # No rerun here, let main script handle it
 
 # --- Button --- #
 # Disable button if processing
@@ -334,16 +323,20 @@ st.button(
 
 # --- Status Display & Refresh Loop --- #
 
+# Read status and check if a thread object exists and is alive
 current_status = st.session_state.get('batch_status', 'idle')
-logger.info(f"UI RERUN: Reading status as '{current_status}'")
+processing_thread = st.session_state.get('processing_thread', None)
+is_processing = processing_thread is not None and processing_thread.is_alive()
+
+logger.info(f"UI RERUN: Reading status='{current_status}', is_processing={is_processing}")
 
 # Display Status / Progress
-if current_status == 'preparing':
-    st.info(f"Preparing batch...") 
-    with st.spinner("Preparing..."): pass
-elif current_status == 'processing':
-    st.info(f"Processing Batch ID: {st.session_state.get('current_batch_id', 'N/A')}...") 
-    with st.spinner("Translating..."): pass 
+if current_status == 'preparing' or is_processing:
+    # Show spinner if preparing OR if thread is still alive (processing)
+    status_message = "Processing..." if is_processing else "Preparing batch..."
+    spinner_message = "Translating..." if is_processing else "Preparing..."
+    st.info(f"{status_message} (Batch: {st.session_state.get('current_batch_id', 'N/A')})" )
+    with st.spinner(spinner_message): pass
 elif current_status == 'completed':
     st.success(f"Batch {st.session_state.get('current_batch_id', 'N/A')} completed successfully!")
 elif current_status == 'completed_with_errors':
@@ -351,12 +344,18 @@ elif current_status == 'completed_with_errors':
 elif current_status == 'failed':
     st.error(f"Batch {st.session_state.get('current_batch_id', 'N/A')} preparation or processing failed. Check logs.")
 
-# Refresh Loop: If preparing or processing, wait and rerun
-if current_status in ['preparing', 'processing']:
-    sleep_duration = 2 # Adjust sleep duration if needed
-    logger.info(f"UI REFRESH: Status is '{current_status}'. Sleeping for {sleep_duration}s and queueing rerun.")
+# Refresh Logic: Only rerun if a thread is *currently* alive 
+# OR if the status is 'preparing' (meaning the thread was just launched)
+if is_processing or current_status == 'preparing':
+    sleep_duration = 2 
+    logger.info(f"UI REFRESH: Job active (status='{current_status}', is_processing={is_processing}). Sleeping {sleep_duration}s and queueing rerun.")
     time.sleep(sleep_duration) 
     st.rerun()
+else:
+    # If not processing and not preparing, clear the thread object if it exists
+    if st.session_state.get('processing_thread') is not None:
+         logger.info("UI REFRESH: Job inactive. Clearing thread object from session state.")
+         st.session_state['processing_thread'] = None
 
 # --- Export --- #
 st.header("3. Export Results")

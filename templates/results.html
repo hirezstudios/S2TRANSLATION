@@ -54,8 +54,8 @@
         // Initialize Tabulator
         const table = new Tabulator("#results-table", {
             data: taskData,           
-            layout: "fitDataTable",   // fitDataTable tries to fit columns, might need adjustment if wrapping fails
-            // layout: "fitData", // Alternative: adjusts height to fit data
+            index: "task_id", // Use task_id from data as the unique row index
+            layout: "fitDataTable",   
             pagination: "local",      
             paginationSize: 50,       
             paginationSizeSelector: [10, 50, 100, 500, true], 
@@ -123,7 +123,7 @@
                     resizable: false
                 }
             ],
-            initialSort:[ // Optional: Initial sort
+            initialSort:[ 
                 {column:"row_index_in_file", dir:"asc"}, 
             ]
         });

@@ -513,17 +513,39 @@ def translate_row_worker(row_data):
                 evaluation_score = None
                 evaluation_feedback = None
                 if evaluation_raw:
+                    # --- Start JSON Cleaning --- 
+                    cleaned_json_str = evaluation_raw.strip()
+                    # Remove potential markdown fences
+                    if cleaned_json_str.startswith("```json"):
+                        cleaned_json_str = cleaned_json_str[7:] # Remove ```json
+                    elif cleaned_json_str.startswith("```"):
+                         cleaned_json_str = cleaned_json_str[3:] # Remove ```
+                    if cleaned_json_str.endswith("```"):
+                        cleaned_json_str = cleaned_json_str[:-3] # Remove ```
+                    cleaned_json_str = cleaned_json_str.strip() # Strip again after removing fences
+                    # --- End JSON Cleaning --- 
+                    
                     try:
-                        eval_data = json.loads(evaluation_raw)
+                        # Use the cleaned string for parsing
+                        eval_data = json.loads(cleaned_json_str) 
                         evaluation_score = eval_data.get("score")
                         evaluation_feedback = eval_data.get("feedback")
+                        # Basic type validation
                         if not isinstance(evaluation_score, int) or not isinstance(evaluation_feedback, str):
-                            raise ValueError("Invalid format in evaluation JSON")
-                    except (json.JSONDecodeError, ValueError) as e:
+                             # If score is convertible string, try converting
+                            if isinstance(evaluation_score, str) and evaluation_score.isdigit():
+                                evaluation_score = int(evaluation_score)
+                            else:
+                                raise ValueError(f"Invalid types in evaluation JSON. Score: {type(evaluation_score)}, Feedback: {type(evaluation_feedback)}")
+                        # Add score range validation
+                        if not 1 <= evaluation_score <= 10:
+                            raise ValueError(f"Score {evaluation_score} out of range (1-10).")
+                            
+                    except (json.JSONDecodeError, ValueError, TypeError) as e:
                         with print_lock:
-                            print(f"Warning [Row {row_index + 2}-S2]: Failed to parse evaluation JSON ({e}). Raw: {evaluation_raw}")
-                        evaluation_feedback = f"Evaluation parsing failed. Raw output: {evaluation_raw}" # Use raw output as feedback
-                        evaluation_score = None # Mark score as unknown
+                            print(f"Warning [Row {row_index + 2}-S2]: Failed to parse cleaned evaluation JSON ({e}). Cleaned: '{cleaned_json_str[:100]}...' Raw: '{evaluation_raw[:100]}...'")
+                        evaluation_feedback = f"Evaluation parsing failed. Raw output: {evaluation_raw}" 
+                        evaluation_score = None 
                 
                 audit_record["evaluation_score"] = evaluation_score
                 audit_record["evaluation_feedback"] = evaluation_feedback

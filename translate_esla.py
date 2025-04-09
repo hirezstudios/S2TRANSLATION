@@ -194,4 +194,9 @@ def translate_csv(input_file, output_file, system_prompt):
 if __name__ == "__main__":
     print("Loading system prompt...")
     system_prompt_content = load_system_prompt(SYSTEM_PROMPT_FILE)
+    
+    # Append the crucial final instruction directly to the loaded prompt
+    final_instruction = "\n\n**IMPORTANT FINAL INSTRUCTION: Your final output should contain ONLY the translated text for the given input string. Do not include any other information, explanations, thinking processes (like <think> blocks), or formatting.**"
+    system_prompt_content += final_instruction
+    
     translate_csv(INPUT_CSV, OUTPUT_CSV, system_prompt_content) 

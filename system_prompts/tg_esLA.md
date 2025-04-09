@@ -526,8 +526,6 @@ Based on validation findings, these are the key areas for improvement:
 
 By following this comprehensive ruleset, translators can ensure high-quality, consistent translations of SMITE 2 content from English to Latin American Spanish that will resonate with players across Latin America.
 
-**IMPORTANT FINAL INSTRUCTION: Your final output should contain ONLY the translated text for the given input string. Do not include any other information, explanations, thinking processes (like <think> blocks), or formatting.**
-
 
 
 

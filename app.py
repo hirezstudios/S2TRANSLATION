@@ -186,55 +186,78 @@ with col2:
 st.header("2. Run Translation")
 
 def run_translation_thread(file_path, selected_langs, mode_config):
-    """Target function for the background processing thread."""
-    st.session_state['batch_status'] = 'preparing'
+    """Target function for the background processing thread.
+       Updates session state and triggers reruns at key points."""
+    batch_id_local = None # Local var for batch ID
     try:
+        logger.info(f"Background thread started for {file_path}")
+        st.session_state['batch_status'] = 'preparing' # Ensure status starts as preparing
+        # Note: It's generally unsafe to call st.rerun() directly here
+        # but we need to signal the UI change.
+        # Consider if a queue/callback from thread is better long-term.
+        # For now, trying direct rerun after key state changes.
+        
         # 1. Prepare Batch (Uses mode_config)
-        batch_id = translation_service.prepare_batch(file_path, selected_langs, mode_config)
-        if batch_id:
-            st.session_state['current_batch_id'] = batch_id
-            st.session_state['batch_status'] = 'processing'
-            logger.info(f"Starting processing for batch {batch_id} in background...")
-            
+        logger.info("Calling prepare_batch...")
+        batch_id_local = translation_service.prepare_batch(file_path, selected_langs, mode_config)
+        
+        if batch_id_local:
+            st.session_state['current_batch_id'] = batch_id_local
+            st.session_state['batch_status'] = 'processing' # Update status
+            logger.info(f"Prepare batch SUCCESS. Batch ID: {batch_id_local}. Status -> processing. Triggering rerun.")
+            try:
+                 st.rerun() # Rerun to show 'processing' status
+            except Exception as rerun_err:
+                 logger.warning(f"Ignoring error during first st.rerun in thread: {rerun_err}")
+                 # Continue processing even if rerun fails here
+
             # Get initialized clients *within the thread* from the api_clients module
             openai_client_thread = api_clients.get_openai_client()
-            # Gemini is handled internally per call
             
             # 2. Process Batch (Pass clients)
+            logger.info(f"Calling process_batch for {batch_id_local}...")
             processed_data, success = translation_service.process_batch(
-                batch_id, 
+                batch_id_local, 
                 openai_client_obj=openai_client_thread 
             )
+            logger.info(f"Process_batch finished for {batch_id_local}. Success: {success}")
             
+            # 3. Update Final Status based on success
             if success:
                 st.session_state['batch_status'] = 'completed'
                 st.session_state['export_data'] = processed_data
-                # Corrected filename generation using original uploaded file name
-                # Use API from config for consistency (e.g., default API for the batch)
                 base_name = os.path.splitext(uploaded_file.name)[0]
                 api_name = mode_config.get('default_api', 'unknown').lower()
-                st.session_state['export_filename'] = f"output_{base_name}_{api_name}_batch_{batch_id[:8]}.csv"
-                logger.info(f"Batch {batch_id} completed successfully.")
+                st.session_state['export_filename'] = f"output_{base_name}_{api_name}_batch_{batch_id_local[:8]}.csv"
+                logger.info(f"Batch {batch_id_local} completed successfully. Status -> completed.")
             else:
                 st.session_state['batch_status'] = 'completed_with_errors'
                 st.session_state['export_data'] = processed_data 
-                # Corrected filename generation
                 base_name = os.path.splitext(uploaded_file.name)[0]
                 api_name = mode_config.get('default_api', 'unknown').lower()
-                st.session_state['export_filename'] = f"output_{base_name}_{api_name}_batch_{batch_id[:8]}_ERRORS.csv"
-                logger.warning(f"Batch {batch_id} completed with errors.")
+                st.session_state['export_filename'] = f"output_{base_name}_{api_name}_batch_{batch_id_local[:8]}_ERRORS.csv"
+                logger.warning(f"Batch {batch_id_local} completed with errors. Status -> completed_with_errors.")
         else:
             st.session_state['batch_status'] = 'failed'
-            logger.error("Batch preparation failed.")
+            logger.error("Batch preparation failed. Status -> failed.")
 
     except Exception as e:
         st.session_state['batch_status'] = 'failed'
-        logger.exception(f"Error during background translation thread: {e}")
+        logger.exception(f"Critical error during background thread for batch {batch_id_local or 'UNKNOWN'}: {e}")
+        # Also set batch status in DB if possible
+        if batch_id_local:
+            try:
+                db_manager.update_batch_status(config.DATABASE_FILE, batch_id_local, 'failed')
+            except Exception as db_e:
+                logger.error(f"Failed to update batch status to failed in DB: {db_e}")
     finally:
-        # Thread finished (successfully or with error)
-        # The main thread will detect completion and trigger the rerun
-        # st.rerun() # DO NOT rerun from background thread
-        pass
+        logger.info("Background thread finished. Triggering final rerun.")
+        # Trigger final UI update regardless of success/failure
+        try:
+            st.rerun()
+        except Exception as rerun_err:
+            logger.warning(f"Ignoring error during final st.rerun in thread: {rerun_err}")
+        # Thread completes here
 
 # --- Callback Function --- #
 def start_translation_job_callback():
@@ -324,12 +347,6 @@ elif st.session_state['batch_status'] == 'completed_with_errors':
     st.warning(f"Batch {st.session_state.get('current_batch_id', 'N/A')} completed with errors. Check logs and Audit file.")
 elif st.session_state['batch_status'] == 'failed':
     st.error(f"Batch {st.session_state.get('current_batch_id', 'N/A')} preparation or processing failed. Check logs.")
-
-# Refresh Loop: If preparing or processing, wait and rerun
-if st.session_state['batch_status'] in ['preparing', 'processing']:
-    logger.debug(f"Current status is {st.session_state['batch_status']}, sleeping and rerunning...")
-    time.sleep(2) # Wait a couple of seconds before refresh
-    st.rerun()
 
 # --- Export --- #
 st.header("3. Export Results")

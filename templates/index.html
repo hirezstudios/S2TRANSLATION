@@ -92,6 +92,9 @@
     const statusArea = document.getElementById('status-area');
     const progressArea = document.getElementById('progress-area');
     const progressBar = document.getElementById('progress-bar');
+    const exportArea = document.getElementById('export-area');
+    let currentBatchId = null;
+    let statusInterval = null;
 
     // --- Toggle API Config UI --- 
     const modeRadios = document.querySelectorAll('input[name="mode"]');
@@ -198,6 +201,7 @@
 
         setStatus('Starting job...', 'info');
         startBtn.disabled = true;
+        stopStatusPolling();
         progressBar.style.width = '0%';
         progressBar.textContent = '0%';
         progressArea.style.display = 'none'; 
@@ -210,9 +214,10 @@
             const data = await response.json();
 
             if (response.ok) {
-                setStatus(`Job ${data.batch_id} started. Waiting for progress...`, 'info');
+                currentBatchId = data.batch_id;
+                setStatus(`Job ${currentBatchId} started. Waiting for progress...`, 'info');
                 progressArea.style.display = 'block'; 
-                startStatusPolling(data.batch_id);
+                startStatusPolling(currentBatchId);
             } else {
                 setStatus(`Error starting job: ${data.error || 'Unknown error'}`, 'danger');
                 startBtn.disabled = false;

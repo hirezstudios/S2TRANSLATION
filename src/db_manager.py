@@ -174,6 +174,19 @@ def get_task_by_row_index(db_file_path, batch_id, row_index):
     finally:
         conn.close()
 
+def count_tasks_for_batch(db_file_path, batch_id):
+    """Counts the total number of tasks associated with a batch."""
+    conn = get_db_connection(db_file_path)
+    try:
+        cursor = conn.execute("SELECT COUNT(*) FROM TranslationTasks WHERE batch_id = ?", (batch_id,))
+        count = cursor.fetchone()[0]
+        return count
+    except sqlite3.Error as e:
+        logger.error(f"Failed to count tasks for batch {batch_id}: {e}")
+        return 0 # Return 0 on error
+    finally:
+        conn.close()
+
 def update_batch_status(db_file_path, batch_id, status):
     """Updates the status of a batch."""
     conn = get_db_connection(db_file_path)

@@ -1,6 +1,6 @@
 import os
 import logging
-from flask import Flask, request, render_template, jsonify
+from flask import Flask, request, render_template, jsonify, send_file
 import uuid
 import json
 import threading
@@ -44,10 +44,17 @@ def create_app():
             if file.filename == '':
                 return jsonify({"error": "No selected file"}), 400
             
-            # TODO: Get selected languages, mode, api config from request.form
-            selected_languages = request.form.getlist('languages[]') # Example if sent as list
+            # Get selected languages, mode, api config from form
+            selected_languages = request.form.getlist('languages') # Assume name="languages"
             mode = request.form.get('mode', 'ONE_STAGE')
-            # ... extract other config ...
+            one_stage_api = request.form.get('one_stage_api')
+            one_stage_model = request.form.get('one_stage_model') or None # Convert empty string to None
+            s1_api = request.form.get('s1_api')
+            s1_model = request.form.get('s1_model') or None
+            s2_api = request.form.get('s2_api')
+            s2_model = request.form.get('s2_model') or None
+            s3_api = request.form.get('s3_api')
+            s3_model = request.form.get('s3_model') or None
             
             if not selected_languages:
                  return jsonify({"error": "No languages selected"}), 400
@@ -60,11 +67,29 @@ def create_app():
             file.save(file_path)
             logger.info(f"Temporarily saved uploaded file to {file_path}")
             
-            # Construct mode_config dictionary (as done in Streamlit app)
-            mode_config = {"mode": mode, "languages": selected_languages, # Add API/Model config here 
-                          "s1_api": request.form.get('s1_api'), # ... etc
-                          }
-                          
+            # Construct mode_config dictionary 
+            if mode == "ONE_STAGE":
+                mode_config = {
+                    "mode": mode, 
+                    "languages": selected_languages, 
+                    "default_api": one_stage_api, 
+                    "s1_api": one_stage_api, "s1_model": one_stage_model,
+                    "s2_api": None, "s2_model": None,
+                    "s3_api": None, "s3_model": None,
+                 }
+            else: # THREE_STAGE
+                 mode_config = {
+                    "mode": mode, 
+                    "languages": selected_languages, 
+                    "default_api": config.DEFAULT_API, # Still needed for reference?
+                    "s1_api": s1_api,
+                    "s2_api": s2_api,
+                    "s3_api": s3_api,
+                    "s1_model": s1_model, 
+                    "s2_model": s2_model,
+                    "s3_model": s3_model,
+                }
+            
             # Call backend prepare_batch
             batch_id = translation_service.prepare_batch(file_path, selected_languages, mode_config)
 
@@ -120,7 +145,39 @@ def create_app():
             logger.error(f"Error fetching status for batch {batch_id}: {e}", exc_info=True)
             return jsonify({"error": "Failed to fetch status"}), 500
             
-    # Placeholder for other routes: /results, /rules, /export
+    # Add Export route
+    @app.route('/export/<batch_id>')
+    def export_batch(batch_id):
+        logger.info(f"Received export request for batch {batch_id}")
+        try:
+            # Determine expected output filename (needs original filename)
+            batch_info = db_manager.get_batch_info(config.DATABASE_FILE, batch_id)
+            if not batch_info or not batch_info['config_details']:
+                return jsonify({"error": "Batch configuration not found"}), 404
+                
+            batch_config = json.loads(batch_info['config_details'])
+            original_filename = batch_info['upload_filename'] or "unknown_file.csv"
+            base_name = os.path.splitext(original_filename)[0]
+            api_name = batch_config.get('default_api', 'unknown').lower()
+            # Use batch status to determine filename suffix
+            error_suffix = "_ERRORS" if batch_info['status'] != 'completed' else ""
+            output_filename = f"output_{base_name}_{api_name}_batch_{batch_id[:8]}{error_suffix}.csv"
+            output_file_path = os.path.join(config.OUTPUT_DIR, output_filename)
+
+            # Generate the file
+            success = translation_service.generate_export(batch_id, output_file_path)
+
+            if success and os.path.exists(output_file_path):
+                return send_file(output_file_path, as_attachment=True, download_name=output_filename)
+            else:
+                 logger.error(f"Failed to generate or find export file for batch {batch_id} at {output_file_path}")
+                 return jsonify({"error": "Failed to generate export file."}), 500
+
+        except Exception as e:
+            logger.error(f"Error during export for batch {batch_id}: {e}", exc_info=True)
+            return jsonify({"error": "An unexpected error occurred during export."}), 500
+            
+    # Placeholder for other routes: /results, /rules
     @app.route('/placeholder')
     def placeholder():
         return "Route not implemented yet."

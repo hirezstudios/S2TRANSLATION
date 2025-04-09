@@ -19,8 +19,8 @@
 
         <div class="row mb-3">
             <div class="col-md-6">
-                <label class="form-label">Translation Mode</label>
-                <div>
+                <label class="form-label d-block">Translation Mode</label>
+                <div class="mb-2">
                     <div class="form-check form-check-inline">
                         <input class="form-check-input" type="radio" name="mode" id="mode_one" value="ONE_STAGE" checked>
                         <label class="form-check-label" for="mode_one">One Stage</label>
@@ -30,46 +30,55 @@
                         <label class="form-check-label" for="mode_three">Three Stage</label>
                     </div>
                 </div>
+                
+                <!-- Button to toggle advanced config -->
+                <button class="btn btn-outline-secondary btn-sm" type="button" data-bs-toggle="collapse" data-bs-target="#collapseApiConfig" aria-expanded="false" aria-controls="collapseApiConfig">
+                    Advanced API/Model Settings
+                </button>
             </div>
-            <div class="col-md-6">
-                <label class="form-label">API Configuration</label>
-                <div id="api-config-one-stage">
+
+            <!-- Collapsible API Configuration Section -->
+            <div class="col-md-6 collapse" id="collapseApiConfig"> 
+                <label class="form-label">API Configuration Details</label>
+                <div id="api-config-one-stage" class="mt-2 p-3 border rounded bg-light">
+                    <h6>One Stage API</h6>
                     <select class="form-select mb-2" name="one_stage_api" id="one_stage_api">
                         {% for api in valid_apis %}
                         <option value="{{ api }}" {% if api == default_apis.ONE_STAGE %}selected{% endif %}>{{ api }}</option>
                         {% endfor %}
                     </select>
-                    <input type="text" class="form-control" name="one_stage_model" placeholder="Optional Model Override">
+                    <input type="text" class="form-control form-control-sm" name="one_stage_model" placeholder="Optional Model Override">
                 </div>
-                <div id="api-config-three-stage" style="display: none;">
+                <div id="api-config-three-stage" style="display: none;" class="mt-2 p-3 border rounded bg-light">
+                     <h6>Three Stage APIs</h6>
                      <label class="form-label small">Stage 1 API:</label>
-                     <select class="form-select mb-1" name="s1_api" id="s1_api">
-                        {% for api in valid_apis %}
+                     <select class="form-select form-select-sm mb-1" name="s1_api" id="s1_api">
+                         {% for api in valid_apis %}
                         <option value="{{ api }}" {% if api == default_apis.S1 %}selected{% endif %}>{{ api }}</option>
                         {% endfor %}
                      </select>
-                     <input type="text" class="form-control mb-2" name="s1_model" placeholder="S1 Model Override">
+                     <input type="text" class="form-control form-control-sm mb-2" name="s1_model" placeholder="S1 Model Override">
                      
                      <label class="form-label small">Stage 2 API:</label>
-                     <select class="form-select mb-1" name="s2_api" id="s2_api">
+                     <select class="form-select form-select-sm mb-1" name="s2_api" id="s2_api">
                          {% for api in valid_apis %}
                         <option value="{{ api }}" {% if api == default_apis.S2 %}selected{% endif %}>{{ api }}</option>
                         {% endfor %}
                      </select>
-                     <input type="text" class="form-control mb-2" name="s2_model" placeholder="S2 Model Override">
+                     <input type="text" class="form-control form-control-sm mb-2" name="s2_model" placeholder="S2 Model Override">
 
                      <label class="form-label small">Stage 3 API:</label>
-                     <select class="form-select mb-1" name="s3_api" id="s3_api">
+                     <select class="form-select form-select-sm mb-1" name="s3_api" id="s3_api">
                          {% for api in valid_apis %}
                         <option value="{{ api }}" {% if api == default_apis.S3 %}selected{% endif %}>{{ api }}</option>
                         {% endfor %}
                      </select>
-                     <input type="text" class="form-control" name="s3_model" placeholder="S3 Model Override">
+                     <input type="text" class="form-control form-control-sm" name="s3_model" placeholder="S3 Model Override">
                 </div>
             </div>
         </div>
 
-        <button type="button" id="start-job-btn" class="btn btn-primary">Start Translation Job</button>
+        <button type="button" id="start-job-btn" class="btn btn-primary mt-3">Start Translation Job</button>
     </form>
 
     <hr>
@@ -98,19 +107,22 @@
 
     // --- Toggle API Config UI --- 
     const modeRadios = document.querySelectorAll('input[name="mode"]');
-    const oneStageConfig = document.getElementById('api-config-one-stage');
-    const threeStageConfig = document.getElementById('api-config-three-stage');
-    function toggleApiConfig() {
+    const oneStageConfigDiv = document.getElementById('api-config-one-stage');
+    const threeStageConfigDiv = document.getElementById('api-config-three-stage');
+    
+    function toggleApiConfigVisibility() {
+        // This function now ONLY toggles between the ONE and THREE stage sections *within* the collapsible div
         if (document.getElementById('mode_one').checked) {
-            oneStageConfig.style.display = 'block';
-            threeStageConfig.style.display = 'none';
+            oneStageConfigDiv.style.display = 'block';
+            threeStageConfigDiv.style.display = 'none';
         } else {
-            oneStageConfig.style.display = 'none';
-            threeStageConfig.style.display = 'block';
+            oneStageConfigDiv.style.display = 'none';
+            threeStageConfigDiv.style.display = 'block';
         }
     }
-    modeRadios.forEach(radio => radio.addEventListener('change', toggleApiConfig));
-    toggleApiConfig(); // Initial call
+    modeRadios.forEach(radio => radio.addEventListener('change', toggleApiConfigVisibility));
+    // Initial call remains important to set the correct display based on default mode
+    toggleApiConfigVisibility(); 
 
     // --- Fetch Valid Languages on File Change --- 
     fileInput.addEventListener('change', async (event) => {

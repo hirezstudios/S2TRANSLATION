@@ -12,7 +12,6 @@ Translation Rules:
 - Output only the translated text — no quotes, markdown, or extra formatting
 - Verify output to match tag/placeholder structure from source
 
-Rules for Spanish Translation:
 
 ## LANGUAGE SPECIFIC RULESET (Latin Americcan Neutral Spanish) 
 ### Grammatical Rules

@@ -17,6 +17,18 @@ import json # Added for audit logging
 # Load environment variables from .env file
 load_dotenv()
 
+# --- Language Configuration --- 
+# TODO: Make this configurable, e.g., via command-line argument or .env
+LANGUAGE_CODE = "esLA" 
+# Simple mapping for language names (expand as needed)
+LANGUAGE_NAME_MAP = {
+    "esLA": "Latin American Spanish",
+    "frFR": "French (France)",
+    # Add other languages here
+}
+TARGET_LANGUAGE_NAME = LANGUAGE_NAME_MAP.get(LANGUAGE_CODE, LANGUAGE_CODE) # Fallback to code if name not found
+# --- End Language Configuration ---
+
 # --- API Configuration --- 
 # General Settings
 ACTIVE_API = os.getenv("ACTIVE_API", "PERPLEXITY").upper()
@@ -44,7 +56,6 @@ GEMINI_MODEL = os.getenv("GEMINI_MODEL")
 # --- CSV Configuration ---
 INPUT_CSV = "input/blake-small.csv"
 # Dynamically generate output filename based on API and language
-LANGUAGE_CODE = "esLA" # TODO: Make this dynamic if supporting multiple languages
 OUTPUT_CSV = f"output/blake-small_{LANGUAGE_CODE}_{ACTIVE_API.lower()}.csv"
 SYSTEM_PROMPT_FILE = f"system_prompts/tg_{LANGUAGE_CODE}.md"
 SOURCE_COLUMN = "src_enUS"
@@ -63,10 +74,10 @@ STAGE3_API = os.getenv("STAGE3_API", DEFAULT_API).upper()
 STAGE1_MODEL_OVERRIDE = os.getenv("STAGE1_MODEL")
 STAGE2_MODEL_OVERRIDE = os.getenv("STAGE2_MODEL")
 STAGE3_MODEL_OVERRIDE = os.getenv("STAGE3_MODEL")
-# Define system prompt file paths
-STAGE1_PROMPT_FILE = f"system_prompts/tg_{LANGUAGE_CODE}.md"
-STAGE2_PROMPT_FILE = f"system_prompts/stage2_evaluate_{LANGUAGE_CODE}.md"
-STAGE3_PROMPT_FILE = f"system_prompts/stage3_refine_{LANGUAGE_CODE}.md"
+# Define system prompt template file paths
+STAGE1_PROMPT_FILE = f"system_prompts/tg_{LANGUAGE_CODE}.md" # Specific language rules for stage 1
+STAGE2_TEMPLATE_FILE = f"system_prompts/stage2_evaluate_template.md" # Use template
+STAGE3_TEMPLATE_FILE = f"system_prompts/stage3_refine_template.md" # Use template
 # --- End Workflow Configuration ---
 
 # --- Threading and Retry Configuration ---
@@ -93,28 +104,28 @@ print_lock = threading.Lock()
 translated_counter = 0
 error_counter = 0
 stage1_system_prompt = None # Load prompts globally once
-stage2_system_prompt = None
-stage3_system_prompt = None
+stage2_template_prompt = None # Store the template content
+stage3_template_prompt = None # Store the template content
 
 def load_system_prompts():
-    """Loads all necessary system prompts."""
-    global stage1_system_prompt, stage2_system_prompt, stage3_system_prompt
+    """Loads the base language ruleset and stage prompt templates."""
+    global stage1_system_prompt, stage2_template_prompt, stage3_template_prompt
     
-    print(f"Loading Stage 1 prompt from {STAGE1_PROMPT_FILE}...")
-    stage1_system_prompt = load_single_prompt(STAGE1_PROMPT_FILE)
-    # Append the crucial final instruction directly to the loaded prompt
-    final_instruction = "\n\n**IMPORTANT FINAL INSTRUCTION: Your final output should contain ONLY the translated text (or evaluation, depending on the stage) for the given input string. Do not include any other information, explanations, thinking processes (like <think> blocks), or formatting.**"
-    stage1_system_prompt += final_instruction
+    print(f"Loading Base Rules (Stage 1) from {STAGE1_PROMPT_FILE}...")
+    stage1_system_prompt_raw = load_single_prompt(STAGE1_PROMPT_FILE)
+    # The final instruction for the API call itself
+    final_instruction = "\n\n**IMPORTANT FINAL INSTRUCTION: Your final output should contain ONLY the translated text (or evaluation/revision, depending on the stage) for the given input string. Do not include any other information, explanations, thinking processes (like <think> blocks), or formatting.**"
+    # Store the raw rules + final instruction for stage 1 calls
+    stage1_system_prompt = stage1_system_prompt_raw + final_instruction
 
     if TRANSLATION_MODE == "THREE_STAGE":
-        print(f"Loading Stage 2 prompt from {STAGE2_PROMPT_FILE}...")
-        stage2_system_prompt = load_single_prompt(STAGE2_PROMPT_FILE)
-        stage2_system_prompt += final_instruction # Also add instruction here
+        print(f"Loading Stage 2 Template from {STAGE2_TEMPLATE_FILE}...")
+        stage2_template_prompt = load_single_prompt(STAGE2_TEMPLATE_FILE)
+        # We add the final instruction dynamically later when constructing the full prompt
         
-        print(f"Loading Stage 3 prompt from {STAGE3_PROMPT_FILE}...")
-        stage3_system_prompt = load_single_prompt(STAGE3_PROMPT_FILE)
-        stage3_system_prompt += final_instruction # And here
-        
+        print(f"Loading Stage 3 Template from {STAGE3_TEMPLATE_FILE}...")
+        stage3_template_prompt = load_single_prompt(STAGE3_TEMPLATE_FILE)
+        # Add final instruction dynamically later
 
 def load_single_prompt(filepath):
     """Loads a single system prompt from a file."""
@@ -449,6 +460,7 @@ def translate_row_worker(row_data):
         "row_index": row_index + 1, 
         "source": source_text,
         "mode": TRANSLATION_MODE,
+        "language": LANGUAGE_CODE,
     }
 
     if not source_text:
@@ -458,12 +470,15 @@ def translate_row_worker(row_data):
         return row 
 
     try:
+        # Define the final instruction to append to constructed prompts
+        final_instruction = "\n\n**IMPORTANT FINAL INSTRUCTION: Your final output should contain ONLY the final text (evaluation/revision). No extra text, formatting, or explanations.**"
+
         if TRANSLATION_MODE == "ONE_STAGE":
-            # Use DEFAULT_API and its default model (no override needed here)
             api_to_use = DEFAULT_API
             model_to_use = None 
             audit_record = {**audit_record_base, "api": api_to_use, "model": model_to_use or "default"} 
             
+            # Use the globally loaded stage1_system_prompt (already has final instruction)
             final_translation = call_active_api(api_to_use, stage1_system_prompt, source_text, 
                                                 row_identifier=row_index + 2, model_override=model_to_use)
             if final_translation is not None:
@@ -476,10 +491,14 @@ def translate_row_worker(row_data):
             log_audit_record(audit_record)
 
         elif TRANSLATION_MODE == "THREE_STAGE":
-            # --- Stage 1: Initial Translation --- 
+            # Get the base language rules (Stage 1 prompt without its final instruction)
+            base_rules = stage1_system_prompt.replace(final_instruction, "").strip()
+            
+            # --- Stage 1 --- 
             s1_api = STAGE1_API
             s1_model = STAGE1_MODEL_OVERRIDE 
             audit_record = {**audit_record_base, "stage1_api": s1_api, "stage1_model": s1_model or "default"}
+            # Use the globally loaded stage1_system_prompt (already has final instruction)
             initial_translation = call_active_api(s1_api, stage1_system_prompt, source_text, 
                                                 row_identifier=f"{row_index + 2}-S1", model_override=s1_model)
             audit_record["initial_translation"] = initial_translation
@@ -490,22 +509,23 @@ def translate_row_worker(row_data):
                 audit_record["error"] = "Stage 1 API call failed after retries"
                 log_audit_record(audit_record)
             else:
-                # --- Stage 2: Evaluation --- 
+                # --- Stage 2 --- 
                 s2_api = STAGE2_API
                 s2_model = STAGE2_MODEL_OVERRIDE
                 audit_record["stage2_api"] = s2_api
                 audit_record["stage2_model"] = s2_model or "default"
                 
-                # Construct Stage 2 Prompt 
-                # Ensure stage2_system_prompt is loaded
-                if not stage2_system_prompt:
-                    raise ValueError("Stage 2 system prompt not loaded.")
-                # Inject the base rules (stage1 prompt without final instruction)
-                base_rules = stage1_system_prompt.split("**IMPORTANT FINAL INSTRUCTION:")[0].strip()
-                eval_system_prompt = stage2_system_prompt.replace("<<RULES>>", base_rules) 
-                # Create user content for evaluation stage
-                eval_user_content = f"SOURCE_TEXT:\n{source_text}\n\nINITIAL_TRANSLATION:\n{initial_translation}"
-                
+                # Construct Stage 2 Prompt Dynamically
+                if not stage2_template_prompt:
+                    raise ValueError("Stage 2 template prompt not loaded.")
+                eval_system_prompt = stage2_template_prompt.replace("<<TARGET_LANGUAGE_NAME>>", TARGET_LANGUAGE_NAME)\
+                                                        .replace("<<RULES>>", base_rules)\
+                                                        .replace("<<SOURCE_TEXT>>", source_text)\
+                                                        .replace("<<INITIAL_TRANSLATION>>", initial_translation)
+                eval_system_prompt += final_instruction # Add final instruction
+                # User content for stage 2 is often minimal as context is in the system prompt
+                eval_user_content = "Evaluate the provided translation based on the rules and context."
+                                
                 evaluation_raw = call_active_api(s2_api, eval_system_prompt, eval_user_content, 
                                            row_identifier=f"{row_index + 2}-S2", model_override=s2_model)
                 
@@ -513,7 +533,6 @@ def translate_row_worker(row_data):
                 evaluation_score = None
                 evaluation_feedback = None
                 if evaluation_raw:
-                    # --- Start JSON Cleaning --- 
                     cleaned_json_str = evaluation_raw.strip()
                     # Remove potential markdown fences
                     if cleaned_json_str.startswith("```json"):
@@ -523,10 +542,7 @@ def translate_row_worker(row_data):
                     if cleaned_json_str.endswith("```"):
                         cleaned_json_str = cleaned_json_str[:-3] # Remove ```
                     cleaned_json_str = cleaned_json_str.strip() # Strip again after removing fences
-                    # --- End JSON Cleaning --- 
-                    
                     try:
-                        # Use the cleaned string for parsing
                         eval_data = json.loads(cleaned_json_str) 
                         evaluation_score = eval_data.get("score")
                         evaluation_feedback = eval_data.get("feedback")
@@ -550,32 +566,29 @@ def translate_row_worker(row_data):
                 audit_record["evaluation_score"] = evaluation_score
                 audit_record["evaluation_feedback"] = evaluation_feedback
 
-                if evaluation_feedback is None: # Check if the API call itself failed
+                if evaluation_feedback is None: # Stage 2 API call failed
                     final_translation = initial_translation
                     with print_lock: translated_counter += 1 
                     audit_record["error"] = "Stage 2 API call failed, using Stage 1 result"
                     audit_record["final_translation"] = final_translation 
                     log_audit_record(audit_record)
-                # Decide if refinement is needed (e.g., score < 10 or specific feedback exists) 
-                # Let's proceed to stage 3 regardless for now, unless stage 2 failed entirely.
-                else: 
-                    # --- Stage 3: Refinement --- 
+                else:
+                    # --- Stage 3 --- 
                     s3_api = STAGE3_API
                     s3_model = STAGE3_MODEL_OVERRIDE
                     audit_record["stage3_api"] = s3_api
                     audit_record["stage3_model"] = s3_model or "default"
                     
-                    # Construct Stage 3 Prompt
-                    if not stage3_system_prompt:
-                        raise ValueError("Stage 3 system prompt not loaded.")
-                    # Inject base rules again
-                    refine_system_prompt_template = stage3_system_prompt.replace("<<RULES>>", base_rules)
-                    # Inject dynamic content
-                    refine_system_prompt = refine_system_prompt_template.replace("<<SOURCE_TEXT>>", source_text)\
-                                                                   .replace("<<INITIAL_TRANSLATION>>", initial_translation)\
-                                                                   .replace("<<FEEDBACK>>", evaluation_feedback or "No specific feedback provided.")
+                    # Construct Stage 3 Prompt Dynamically
+                    if not stage3_template_prompt:
+                        raise ValueError("Stage 3 template prompt not loaded.")
+                    refine_system_prompt = stage3_template_prompt.replace("<<TARGET_LANGUAGE_NAME>>", TARGET_LANGUAGE_NAME)\
+                                                                .replace("<<RULES>>", base_rules)\
+                                                                .replace("<<SOURCE_TEXT>>", source_text)\
+                                                                .replace("<<INITIAL_TRANSLATION>>", initial_translation)\
+                                                                .replace("<<FEEDBACK>>", evaluation_feedback or "No specific feedback provided.")
+                    refine_system_prompt += final_instruction # Add final instruction
                                                                    
-                    # User content for stage 3 can be simple, as context is in system prompt
                     refine_user_content = "Revise the translation based on the provided context and feedback."
                     
                     final_translation = call_active_api(s3_api, refine_system_prompt, refine_user_content, 

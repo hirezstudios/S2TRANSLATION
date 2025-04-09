@@ -1,6 +1,18 @@
 lang_code: frFR
 
-# SMITE 2 French (frFR) Translation Ruleset
+Translation Rules:
+- Use your knowledge of gaming culture in the <<FRENCH>> community, along with your deep knowledge of SMITE and of other MOBAs (such as League of Legends and DOTA 2) to inform your translations. 
+- Adhere firmly to the language-specific ruleset provided below. 
+- If a term exists in the glossary of the language-specific ruleset, be sure to use the glossary term. 
+- Preserve all formatting tags (e.g., <x>, <em>) exactly — same type, count, and order
+- Retain placeholders (e.g., {Count}|hpp(...)) exactly, including modifiers
+- Use culturally natural idioms and phrasing instead of literal translations
+- Translate even minimal input like 'Start' or 'TBD' with contextual meaning
+- Follow Unreal Engine standards: plural/gender forms and Hangul post-positions
+- Output only the translated text — no quotes, markdown, or extra formatting
+- Verify output to match tag/placeholder structure from source
+
+## LANGUAGE SPECIFIC RULESET (FRENCH) 
 
 This document provides comprehensive guidelines for translating SMITE 2 content from English to French. It includes special translation rules and a game-specific glossary derived from extensive analysis of the SMITE 2 translation dataset.
 

@@ -822,7 +822,64 @@ def prepare_batch(input_file_path, selected_languages):
     return batch_id
 
 # --- Export --- #
-# ... (generate_export function) ...
+def generate_export(batch_id, output_path, processed_data):
+    """DEPRECATED / Example: Generates export file from processed data."""
+    # This function structure is more suitable for direct script execution.
+    # For Streamlit, app.py will call prepare_batch and process_batch separately.
+    logger.warning("generate_export function is deprecated for direct use, use prepare_batch and process_batch.")
+    
+    logger.info("Running export generation directly (Example Usage - Phase 1)")
+    
+    # 1. Generate Export (if successful)
+    if processed_data: # Check if we got data back
+         # Construct output path based on input filename and config
+         output_filename = f"output_{os.path.splitext(os.path.basename(output_path))[0]}_{config.DEFAULT_API.lower()}_batch_{batch_id[:8]}.csv"
+         output_path = os.path.join(config.OUTPUT_DIR, output_filename)
+         with open(output_path, 'w', encoding='utf-8') as outfile:
+             writer = csv.DictWriter(outfile, fieldnames=processed_data[0].keys())
+             writer.writeheader()
+             writer.writerows(processed_data)
+         print(f"Export generation complete. Check DB ({config.DATABASE_FILE}) and audit log ({config.AUDIT_LOG_FILE})")
+         print(f"Main output attempt saved to: {output_path}")
+    else:
+         print(f"Export generation completed but no data returned for export. Errors may have occurred for batch {batch_id}. Check logs and DB.")
+
+def translate_csv(input_file, output_file):
+    """DEPRECATED / Example: Reads input CSV, prepares batch, processes, exports."""
+    # This function structure is more suitable for direct script execution.
+    # For Streamlit, app.py will call prepare_batch and process_batch separately.
+    logger.warning("translate_csv function is deprecated for direct use, use prepare_batch and process_batch.")
+    
+    logger.info("Running translation service directly (Example Usage - Phase 1)")
+    
+    # Determine available languages based on config AND loaded prompts
+    available_and_prompted_langs = [lang for lang in config.AVAILABLE_LANGUAGES if lang in prompt_manager.stage1_templates]
+    
+    if not available_and_prompted_langs:
+        logger.error("No languages available to translate (check AVAILABLE_LANGUAGES in .env and prompt file existence).")
+        return # Exit function
+        
+    logger.info(f"Selected languages for processing: {available_and_prompted_langs}")
+
+    # 1. Prepare Batch (Parse input, populate DB)
+    batch_id = prepare_batch(input_file, available_and_prompted_langs)
+
+    if batch_id:
+        # 2. Process Batch (Run translations)
+        processed_data, success = process_batch(batch_id)
+        
+        # 3. Generate Export (if successful)
+        if processed_data: # Check if we got data back
+             # Construct output path based on input filename and config
+             output_filename = f"output_{os.path.splitext(os.path.basename(input_file))[0]}_{config.DEFAULT_API.lower()}_batch_{batch_id[:8]}.csv"
+             output_path = os.path.join(config.OUTPUT_DIR, output_filename)
+             generate_export(batch_id, output_path, processed_data=processed_data) 
+             print(f"Processing complete. Check DB ({config.DATABASE_FILE}) and audit log ({config.AUDIT_LOG_FILE})")
+             print(f"Main output attempt saved to: {output_path}")
+        else:
+             print(f"Processing completed but no data returned for export. Errors may have occurred for batch {batch_id}. Check logs and DB.")
+    else:
+        print("Batch preparation failed.")
 
 # --- Main execution (Example CLI usage) --- #
 if __name__ == "__main__":

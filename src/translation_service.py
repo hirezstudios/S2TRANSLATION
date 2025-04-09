@@ -467,231 +467,357 @@ def log_audit_record(record):
         with print_lock:
             print(f"Error writing to audit log: {e}")
 
-# --- Worker and CSV Processing --- 
+# --- Translation Worker --- 
+def translate_row_worker(task_data, worker_config):
+    """Worker function for a single translation task. Fetches data, translates, updates DB."""
+    # Expand task_data dictionary
+    task_id = task_data['task_id']
+    batch_id = task_data['batch_id'] 
+    row_index = task_data['row_index_in_file']
+    lang_code = task_data['language_code']
+    source_text = task_data['source_text']
+    row_identifier = f"{row_index+1}-{lang_code}"
+    
+    # Get config values passed from process_batch
+    db_path = worker_config['db_path']
+    translation_mode = worker_config['translation_mode']
+    default_api = worker_config['default_api']
+    stage1_api_cfg = worker_config['stage1_api']
+    stage2_api_cfg = worker_config['stage2_api']
+    stage3_api_cfg = worker_config['stage3_api']
+    stage1_model_override = worker_config['stage1_model']
+    stage2_model_override = worker_config['stage2_model']
+    stage3_model_override = worker_config['stage3_model']
+    target_column_tpl = worker_config['target_column_tpl']
 
-def translate_row_worker(task_data):
-    """Worker function to translate a single row based on TRANSLATION_MODE."""
-    global translated_counter, error_counter 
-    row, row_index = task_data 
-    source_text = row.get(SOURCE_COLUMN, "").strip()
+    db_manager.update_task_status(db_path, task_id, 'running')
+    
+    # Initialize results variables
     final_translation = ""
-    initial_translation = None
-    evaluation_score = None
-    evaluation_feedback = None
+    initial_translation = task_data.get('initial_translation') 
+    evaluation_score = task_data.get('evaluation_score')
+    evaluation_feedback = task_data.get('evaluation_feedback')
     error_message = None
     final_status = 'error' # Default to error
-
-    audit_record_base = {
-        "row_index": row_index + 1, 
-        "source": source_text,
-        "mode": TRANSLATION_MODE,
-        "language": LANGUAGE_CODE,
-    }
+    
+    audit_record_base = {"task_id": task_id, "row_index": row_index + 1, "language": lang_code, "mode": translation_mode}
 
     if not source_text:
-        row[TARGET_COLUMN] = ""
-        # Log empty source only if required, otherwise skip
-        # log_audit_record({**audit_record_base, "error": "Empty source text"})
-        return row 
-
+        logger.warning(f"Task {task_id} (Row {row_identifier}): Source text empty.")
+        final_status = 'completed'
+        error_message = "Empty source text"
+        audit_record = {**audit_record_base, "error": error_message, "final_translation": ""}
+        db_manager.update_task_results(db_path, task_id, final_status, final_tx="", error_msg=error_message)
+        log_audit_record(audit_record)
+        # Return the original task data updated for merging
+        task_data['final_translation'] = ""
+        task_data['final_status'] = final_status
+        return task_data 
+        
     try:
-        # final_status initialized here is good
-
-        # Define the final instruction to append to constructed prompts
+        # final_status initialized inside try block
+        # final_status = 'error' # Already initialized outside try
+        
+        # Define the final instruction
         final_instruction = "\n\n**IMPORTANT FINAL INSTRUCTION: Your final output should contain ONLY the final text (translation/evaluation/revision). No extra text, formatting, or explanations.**"
-
+        
         # Construct the full ruleset (Global + Language Specific)
-        # Replace language placeholder in the language-specific part
-        # Ensure prompts were loaded
-        if not global_rules_content or not stage1_language_specific_prompt:
-             raise ValueError("Global or language-specific prompts not loaded correctly.")
-             
-        lang_specific_part = stage1_language_specific_prompt.replace("<<TARGET_LANGUAGE_NAME>>", TARGET_LANGUAGE_NAME)
-        full_ruleset_prompt = f"{lang_specific_part}\n\n{global_rules_content}" # Lang specific first, then global rules
+        lang_specific_part = prompt_manager.stage1_templates.get(lang_code)
+        if not lang_specific_part:
+             raise ValueError(f"Language specific prompt for {lang_code} not loaded.")
+        lang_name = config.LANGUAGE_NAME_MAP.get(lang_code, lang_code)
+        lang_specific_part = lang_specific_part.replace("<<TARGET_LANGUAGE_NAME>>", lang_name)
+        full_ruleset_prompt = f"{lang_specific_part}\n\n{prompt_manager.global_rules_content}" # Use imported global rules
         
         # Stage 1 prompt = Full Ruleset + Final Instruction
         stage1_prompt = full_ruleset_prompt + final_instruction
         
-        if TRANSLATION_MODE == "ONE_STAGE":
-            api_to_use = DEFAULT_API
+        if translation_mode == "ONE_STAGE":
+            api_to_use = default_api
             model_to_use = None 
             audit_record = {**audit_record_base, "api": api_to_use, "model": model_to_use or "default"} 
-            
             final_translation = call_active_api(api_to_use, stage1_prompt, source_text, 
-                                                row_identifier=row_index + 2, model_override=model_to_use)
+                                                row_identifier=row_identifier, model_override=model_to_use)
             if final_translation is not None:
-                with print_lock: translated_counter += 1
+                final_status = 'completed'
                 audit_record["final_translation"] = final_translation
             else:
-                with print_lock: error_counter += 1
+                error_message = "Stage 1 API call failed after retries"
                 final_translation = "" 
-                audit_record["error"] = "Stage 1 API call failed after retries"
+                audit_record["error"] = error_message
+                final_status = 'error' # Ensure status is error
             log_audit_record(audit_record)
 
-        elif TRANSLATION_MODE == "THREE_STAGE":
-            # Use the constructed stage1_prompt for the first call
+        elif translation_mode == "THREE_STAGE":
             # --- Stage 1 --- 
-            s1_api = STAGE1_API
-            s1_model = STAGE1_MODEL_OVERRIDE 
+            s1_api = stage1_api_cfg
+            s1_model = stage1_model_override 
             audit_record = {**audit_record_base, "stage1_api": s1_api, "stage1_model": s1_model or "default"}
             initial_translation = call_active_api(s1_api, stage1_prompt, source_text, 
-                                                row_identifier=f"{row_index + 2}-S1", model_override=s1_model)
+                                                row_identifier=f"{row_identifier}-S1", model_override=s1_model)
             audit_record["initial_translation"] = initial_translation
+            db_manager.update_task_results(db_path, task_id, 'stage1_complete', initial_tx=initial_translation) 
 
             if initial_translation is None or initial_translation.startswith("ERROR:BLOCKED:"):
-                # ... (handle S1 error) ...
-                db_manager.update_task_results(config.DATABASE_FILE, row_index + 2, 'error', initial_translation, None, None, None, initial_translation)
+                error_message = initial_translation if initial_translation else "Stage 1 API call failed after retries"
+                final_translation = "" 
+                audit_record["error"] = error_message
                 log_audit_record(audit_record) 
-                return False # Return result
+                final_status = 'error' # Ensure status is error
             else:
-                # ... (Stage 2 logic) ...
-                db_manager.update_task_results(config.DATABASE_FILE, row_index + 2, 'stage2_complete', initial_tx=initial_translation, score=None, feedback=None) # Update DB after S2
+                # --- Stage 2 --- 
+                s2_api = stage2_api_cfg
+                s2_model = stage2_model_override
+                audit_record["stage2_api"] = s2_api
+                audit_record["stage2_model"] = s2_model or "default"
+                stage2_prompt = prompt_manager.get_full_prompt(stage=2, lang_code=lang_code, source_text=source_text, initial_translation=initial_translation)
+                eval_user_content = "Evaluate the provided translation based on the rules and context."
+                evaluation_raw = call_active_api(s2_api, stage2_prompt, eval_user_content, 
+                                           row_identifier=f"{row_identifier}-S2", model_override=s2_model)
+                
+                evaluation_score = None
+                evaluation_feedback = None
+                if evaluation_raw and not evaluation_raw.startswith("ERROR:BLOCKED:"):
+                    # ... (JSON cleaning and parsing logic) ...
+                    cleaned_json_str = evaluation_raw.strip() 
+                    if cleaned_json_str.startswith("```json"): cleaned_json_str = cleaned_json_str[7:]
+                    elif cleaned_json_str.startswith("```"): cleaned_json_str = cleaned_json_str[3:]
+                    if cleaned_json_str.endswith("```"): cleaned_json_str = cleaned_json_str[:-3]
+                    cleaned_json_str = cleaned_json_str.strip()
+                    try:
+                        eval_data = json.loads(cleaned_json_str)
+                        score = eval_data.get("score")
+                        feedback = eval_data.get("feedback")
+                        if isinstance(score, str) and score.isdigit(): score = int(score)
+                        if isinstance(score, int) and isinstance(feedback, str) and 1 <= score <= 10:
+                            evaluation_score = score
+                            evaluation_feedback = feedback
+                        else: raise ValueError("Invalid types/range/format in evaluation JSON")
+                    except Exception as e:
+                        logger.warning(f"[Row {row_identifier}-S2]: Failed parsing eval JSON ({e}). Cleaned: '{cleaned_json_str[:50]}...'")
+                        evaluation_feedback = f"ERROR:PARSING:{e}"
+                elif evaluation_raw and evaluation_raw.startswith("ERROR:BLOCKED:"):
+                    evaluation_feedback = evaluation_raw 
+                else: 
+                    evaluation_feedback = None # API call failed
+
+                audit_record["evaluation_score"] = evaluation_score
+                audit_record["evaluation_feedback"] = evaluation_feedback
+                db_manager.update_task_results(db_path, task_id, 'stage2_complete', initial_tx=initial_translation, score=evaluation_score, feedback=evaluation_feedback) 
 
                 if evaluation_feedback is None:
-                    # ... (handle S2 error) ...
-                    db_manager.update_task_results(config.DATABASE_FILE, row_index + 2, 'error', initial_translation, None, None, None, initial_translation)
+                    final_translation = initial_translation 
+                    error_message = "Stage 2 API call failed, using Stage 1 result"
+                    audit_record["error"] = error_message
+                    audit_record["final_translation"] = final_translation 
                     log_audit_record(audit_record)
-                    return False # Return result
+                    final_status = 'completed' # Completed with fallback
                 elif evaluation_feedback.startswith("ERROR:"): 
-                    # ... (handle S2 parsing/blocked error) ...
-                    db_manager.update_task_results(config.DATABASE_FILE, row_index + 2, 'error', initial_translation, None, None, None, initial_translation)
+                    final_translation = initial_translation 
+                    error_message = f"Stage 2 failed ({evaluation_feedback}), using Stage 1 result"
+                    audit_record["error"] = error_message
+                    audit_record["final_translation"] = final_translation
                     log_audit_record(audit_record)
-                    return False # Return result
+                    final_status = 'completed' # Completed with fallback 
                 else:
-                    # ... (Stage 3 logic) ...
+                    # --- Stage 3 --- 
+                    s3_api = stage3_api_cfg
+                    s3_model = stage3_model_override
+                    audit_record["stage3_api"] = s3_api
+                    audit_record["stage3_model"] = s3_model or "default"
+                    stage3_prompt = prompt_manager.get_full_prompt(stage=3, lang_code=lang_code, source_text=source_text, initial_translation=initial_translation, feedback=evaluation_feedback)
+                    refine_user_content = "Revise the translation based on the provided context and feedback."
+                    final_translation = call_active_api(s3_api, stage3_prompt, refine_user_content, 
+                                                      row_identifier=f"{row_identifier}-S3", model_override=s3_model)
+                    audit_record["final_translation"] = final_translation
+                    
+                    if final_translation is None or final_translation.startswith("ERROR:BLOCKED:"):
+                        error_message = final_translation if final_translation else "Stage 3 API call failed, using Stage 1 result"
+                        final_translation = initial_translation 
+                        audit_record["error"] = error_message
+                        audit_record["final_translation"] = final_translation
+                        final_status = 'completed' # Completed with fallback
+                    else:
+                         final_status = 'completed'
                     log_audit_record(audit_record)
         else:
-             with print_lock: print(f"Error: Unknown TRANSLATION_MODE '{TRANSLATION_MODE}'")
-             error_counter += 1
-             final_translation = "" 
-             audit_record_base["error"] = f"Unknown TRANSLATION_MODE: {TRANSLATION_MODE}"
-             log_audit_record(audit_record_base)
+             error_message = f"Unknown TRANSLATION_MODE: {translation_mode}"
+             logger.error(error_message)
+             log_audit_record({**audit_record_base, "error": error_message})
+             final_translation = ""
+             final_status = 'error'
 
     except Exception as e:
-        logger.exception(f"Critical Error in worker for task {row_index+2} (Row {row_index+2}): {e}")
+        logger.exception(f"Critical Error in worker for task {task_id} (Row {row_identifier}): {e}")
         error_message = f"Critical worker error: {e}"
         log_audit_record({**audit_record_base, "error": error_message})
         final_translation = ""
-        final_status = 'error'
+        final_status = 'error' 
 
-    # Final DB Update for the task
-    # Now all variables (initial_tx, score, feedback, final_tx, error_msg) will have a value (potentially None)
-    db_manager.update_task_results(config.DATABASE_FILE, row_index + 2, final_status, initial_translation, evaluation_score, evaluation_feedback, final_translation, error_message)
+    # Final DB Update 
+    db_manager.update_task_results(db_path, task_id, final_status, initial_translation, evaluation_score, evaluation_feedback, final_translation, error_message)
     
-    # ALWAYS return the row dictionary, updated with the final translation/status
-    row[TARGET_COLUMN] = final_translation 
-    # Add status to row metadata if needed for debugging/export? Maybe not standard.
-    # row["_task_status"] = final_status 
-    return row 
+    # Return the updated task data dictionary for process_batch to handle
+    task_data_copy = dict(task_data) 
+    task_data_copy['final_translation'] = final_translation
+    task_data_copy['final_status'] = final_status
+    return task_data_copy 
+
+# --- Batch Processing --- 
+def process_batch(batch_id):
+    """Processes all pending tasks for a given batch_id using thread pool."""
+    logger.info(f"Starting processing for batch_id: {batch_id}")
+    db_path = config.DATABASE_FILE # Get DB path once
+    tasks_to_process = db_manager.get_pending_tasks(db_path, batch_id)
+    total_tasks = len(tasks_to_process)
+    if total_tasks == 0:
+        # ... (handle no tasks) ...
+        return [], True
+
+    logger.info(f"Processing {total_tasks} tasks for batch {batch_id} using up to {config.MAX_WORKER_THREADS} threads...")
+    db_manager.update_batch_status(db_path, batch_id, 'processing')
+    
+    success_count = 0
+    error_count = 0
+    
+    # Prepare config dict to pass to workers
+    worker_config = {
+        'db_path': db_path,
+        'translation_mode': config.TRANSLATION_MODE,
+        'default_api': config.DEFAULT_API,
+        'stage1_api': config.STAGE1_API,
+        'stage2_api': config.STAGE2_API,
+        'stage3_api': config.STAGE3_API,
+        'stage1_model': config.STAGE1_MODEL_OVERRIDE,
+        'stage2_model': config.STAGE2_MODEL_OVERRIDE,
+        'stage3_model': config.STAGE3_MODEL_OVERRIDE,
+        'target_column_tpl': config.TARGET_COLUMN_TPL
+    }
+    
+    processed_task_results = {} # Store results keyed by task_id
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=config.MAX_WORKER_THREADS) as executor:
+        # Pass task data and worker_config
+        future_to_task_id = {executor.submit(translate_row_worker, dict(task), worker_config): task['task_id'] for task in tasks_to_process}
+        
+        for future in tqdm(concurrent.futures.as_completed(future_to_task_id), total=total_tasks, desc=f"Translating Batch {batch_id}"):
+            task_id = future_to_task_id[future]
+            try:
+                # Worker returns the updated task dictionary or None if skipped
+                updated_task_data = future.result()
+                if updated_task_data:
+                    processed_task_results[task_id] = updated_task_data
+                    if updated_task_data.get('final_status') == 'completed':
+                        success_count += 1
+                    else:
+                        error_count += 1
+                # else: worker returned None (e.g., skipped empty source), count neither?
+
+            except Exception as exc:
+                # Find original task info if needed for logging
+                original_task = next((t for t in tasks_to_process if t['task_id'] == task_id), None)
+                row_idx = original_task['row_index_in_file']+1 if original_task else '?'
+                lang = original_task['language_code'] if original_task else '??'
+                logger.exception(f"Task Future (id={task_id}, row={row_idx}-{lang}) generated exception: {exc}")
+                error_count += 1
+                try: 
+                    db_manager.update_task_status(db_path, task_id, 'error', f"Future execution error: {exc}")
+                except Exception as db_exc:
+                    logger.error(f"Failed to update task status to error after future exception: {db_exc}")
+
+    # ... (Logging results - unchanged) ...
+    
+    final_batch_status = 'completed' if error_count == 0 and success_count == total_tasks else 'completed_with_errors' # Adjust logic slightly
+    db_manager.update_batch_status(db_path, batch_id, final_batch_status)
+    
+    # Reconstruct data for export/return using updated task results
+    reconstructed_data_dict = {}
+    all_metadata_keys = set()
+    all_target_cols = set()
+    original_tasks_dict = {t['task_id']: dict(t) for t in tasks_to_process}
+
+    for task_id, result_data in processed_task_results.items():
+        original_task = original_tasks_dict.get(task_id)
+        if not original_task: continue # Should not happen
+
+        row_index = original_task['row_index_in_file']
+        lang_code = original_task['language_code']
+        final_translation = result_data.get('final_translation', '') # Use result from worker
+        metadata_json = original_task['metadata_json']
+        
+        try: metadata = json.loads(metadata_json or '{}')
+        except: metadata = {}
+        all_metadata_keys.update(metadata.keys())
+        target_col = config.TARGET_COLUMN_TPL.format(lang_code=lang_code)
+        all_target_cols.add(target_col)
+
+        if row_index not in reconstructed_data_dict:
+            reconstructed_data_dict[row_index] = {config.SOURCE_COLUMN: original_task['source_text'], **metadata}
+        
+        reconstructed_data_dict[row_index][target_col] = final_translation
+
+    reconstructed_data_list = [reconstructed_data_dict[idx] for idx in sorted(reconstructed_data_dict.keys())]
+    return reconstructed_data_list, error_count == 0
+
+# ... (Input Processing - unchanged) ...
+# ... (Export - unchanged, now receives data from process_batch) ...
+# ... (Main execution - calls process_batch, passes data to export) ...
 
 def translate_csv(input_file, output_file):
-    """Reads input CSV, translates based on mode via threads, writes output CSV & audit log."""
-    global translated_counter, error_counter 
-    translated_counter = 0
-    error_counter = 0
-    processed_rows = []
+    """DEPRECATED / Example: Reads input CSV, prepares batch, processes, exports."""
+    # This function structure is more suitable for direct script execution.
+    # For Streamlit, app.py will call prepare_batch and process_batch separately.
+    logger.warning("translate_csv function is deprecated for direct use, use prepare_batch and process_batch.")
     
-    # Clear audit log file at the start of a run
-    try:
-        open(AUDIT_LOG_FILE, 'w').close() 
-        print(f"Cleared previous audit log: {AUDIT_LOG_FILE}")
-    except Exception as e:
-        print(f"Warning: Could not clear audit log file {AUDIT_LOG_FILE}: {e}")
-
-    try:
-        with open(input_file, 'r', encoding='utf-8') as infile:
-            reader = csv.DictReader(infile)
-            if SOURCE_COLUMN not in reader.fieldnames:
-                 print(f"Error: Input CSV must contain source column '{SOURCE_COLUMN}'.")
-                 exit(1)
-            fieldnames = reader.fieldnames
-            if TARGET_COLUMN not in fieldnames:
-                print(f"Info: Target column '{TARGET_COLUMN}' not found in input, will be added.")
-                fieldnames = list(fieldnames) + [TARGET_COLUMN] 
-            # Pass only row and index to worker, prompts are global
-            rows_to_process = [(row, index) for index, row in enumerate(reader)]
+    logger.info("Running translation service directly (Example Usage - Phase 1)")
+    
+    # Determine available languages based on config AND loaded prompts
+    available_and_prompted_langs = [lang for lang in config.AVAILABLE_LANGUAGES if lang in prompt_manager.stage1_templates]
+    
+    if not available_and_prompted_langs:
+        logger.error("No languages available to translate (check AVAILABLE_LANGUAGES in .env and prompt file existence).")
+        return # Exit function
         
-        total_rows = len(rows_to_process)
-        print(f"Using Mode: {TRANSLATION_MODE}")
-        print(f"Translating {total_rows} rows (Default API: {DEFAULT_API}, up to {MAX_WORKER_THREADS} threads)... Output: {output_file}")
+    logger.info(f"Selected languages for processing: {available_and_prompted_langs}")
 
-        with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKER_THREADS) as executor:
-            futures = [executor.submit(translate_row_worker, row_data) for row_data in rows_to_process]
-            for future in tqdm(concurrent.futures.as_completed(futures), total=total_rows, desc=f"Translating ({DEFAULT_API} - {TRANSLATION_MODE})"):
-                try:
-                    processed_rows.append(future.result()) 
-                except Exception as e:
-                    # This catches errors during future.result() retrieval, less likely now with try/except in worker
-                    with print_lock:
-                        print(f"Error retrieving future result: {e}")
-                    # How to handle this? We don't have the row context easily here.
-                    # Maybe increment a separate 'future retrieval error' counter.
+    # 1. Prepare Batch (Parse input, populate DB)
+    batch_id = prepare_batch(input_file, available_and_prompted_langs)
+
+    if batch_id:
+        # 2. Process Batch (Run translations)
+        processed_data, success = process_batch(batch_id)
         
-        # TODO: Add sorting if strict order is required
+        # 3. Generate Export (if successful)
+        if processed_data: # Check if we got data back
+             # Construct output path based on input filename and config
+             output_filename = f"output_{os.path.splitext(os.path.basename(input_file))[0]}_{config.DEFAULT_API.lower()}_batch_{batch_id[:8]}.csv"
+             output_path = os.path.join(config.OUTPUT_DIR, output_filename)
+             generate_export(batch_id, output_path, processed_data=processed_data) 
+             print(f"Processing complete. Check DB ({config.DATABASE_FILE}) and audit log ({config.AUDIT_LOG_FILE})")
+             print(f"Main output attempt saved to: {output_path}")
+        else:
+             print(f"Processing completed but no data returned for export. Errors may have occurred for batch {batch_id}. Check logs and DB.")
+    else:
+        print("Batch preparation failed.")
 
-        print("\nWriting results to main output file...")
-        with open(output_file, 'w', encoding='utf-8', newline='') as outfile:
-            writer = csv.DictWriter(outfile, fieldnames=fieldnames)
-            writer.writeheader()
-            valid_rows = [row for row in processed_rows if row is not None] 
-            writer.writerows(valid_rows) 
 
-        print(f"\nTranslation process completed.")
-        print(f"Total rows processed: {total_rows}")
-        print(f"Rows resulting in successful final translation: {translated_counter}")
-        print(f"Rows encountering errors: {error_counter}")
-        print(f"Main output saved to: {output_file}")
-        print(f"Detailed audit log saved to: {AUDIT_LOG_FILE}")
-
-    except FileNotFoundError:
-        print(f"Error: Input CSV file not found at {input_file}")
-        exit(1)
-    except Exception as e:
-        print(f"An error occurred during CSV processing: {e}")
-        exit(1)
-
+# --- Main execution (Example CLI usage) --- #
 if __name__ == "__main__":
-    # Check presence of keys for *all potentially used* APIs if in THREE_STAGE mode
-    print(f"Selected Mode: {TRANSLATION_MODE}")
-    print(f"Default API (for ONE_STAGE/Filename): {DEFAULT_API}")
-    apis_to_check = set([DEFAULT_API])
-    if TRANSLATION_MODE == "THREE_STAGE":
-        print(f"Stage APIs: S1={STAGE1_API}, S2={STAGE2_API}, S3={STAGE3_API}")
-        apis_to_check.update([STAGE1_API, STAGE2_API, STAGE3_API])
+    # Initialize DB explicitly if running standalone
+    db_manager.initialize_database(config.DATABASE_FILE)
     
-    # Check keys/models for all APIs that might be used
-    if "PERPLEXITY" in apis_to_check and (not PPLX_API_KEY or not PPLX_MODEL):
-         print(f"Critical Error: Perplexity keys/model missing but required. Exiting.")
-         exit(1)
-    if "OPENAI" in apis_to_check and (not OPENAI_API_KEY or not OPENAI_MODEL):
-         print(f"Critical Error: OpenAI keys/model missing but required. Exiting.")
-         exit(1)
-    if "GEMINI" in apis_to_check and (not GEMINI_API_KEY or not GEMINI_MODEL):
-         print(f"Critical Error: Gemini keys/model missing but required. Exiting.")
-         exit(1)
+    logger.info("Running translation service CLI entry point...")
     
-    # Validate API names
-    valid_apis = ["PERPLEXITY", "OPENAI", "GEMINI"]
-    all_used_apis = list(apis_to_check)
-    if any(api not in valid_apis for api in all_used_apis):
-        invalid_apis = [api for api in all_used_apis if api not in valid_apis]
-        print(f"Critical Error: Invalid API names specified: {invalid_apis}. Must be one of {valid_apis}. Exiting.")
+    # Example: Process a specific file with specific languages
+    # In real app, these would come from UI or arguments
+    input_filename = "blake-small.csv" # Example input filename
+    input_filepath = os.path.join(config.INPUT_CSV_DIR, input_filename) 
+
+    if not os.path.exists(input_filepath):
+        logger.error(f"Input file not found: {input_filepath}")
         exit(1)
-         
-    # Initialize clients (moved from globals for clarity and safety)
-    if "OPENAI" in apis_to_check:
-        # Initialize OpenAI client if needed and not already done
-        if not openai_client: 
-            try:
-                openai_client = openai.OpenAI(api_key=OPENAI_API_KEY)
-                print("OpenAI client initialized.")
-            except Exception as e:
-                print(f"Critical Error: Failed to initialize OpenAI client: {e}. Exiting.")
-                exit(1)
-    if "GEMINI" in apis_to_check:
-        # Gemini configuration happens per-call within its function
-        print("Gemini API may be used; configuration will happen per-thread.")
-        pass 
-            
-    load_system_prompts()
-    translate_csv(INPUT_CSV, OUTPUT_CSV) 
+
+    # Call the (now example) translate_csv function
+    # In the future, we might call prepare_batch and process_batch directly here
+    # based on command-line arguments.
+    translate_csv(input_filepath, None) # Output path is now determined inside generate_export 

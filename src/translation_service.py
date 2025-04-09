@@ -819,7 +819,7 @@ def generate_export(batch_id, output_file_path):
          logger.error(f"Could not determine original header for batch {batch_id}. Cannot generate export.")
          return False
          
-    # Fetch completed task data required for export
+    # Fetch task data including approved translation
     tasks = db_manager.get_completed_tasks_for_export(db_path, batch_id)
     if not tasks:
         logger.warning(f"No task data found or retrieved for export for batch {batch_id}")
@@ -827,29 +827,33 @@ def generate_export(batch_id, output_file_path):
         # Let's write an empty file with header.
         tasks = [] 
 
-    # Reconstruct the data row by row, preserving original row order
+    # Reconstruct the data row by row
     output_data_dict = {}
 
     for task_row in tasks:
         row_index = task_row['row_index_in_file']
         lang_code = task_row['language_code']
-        translation = task_row['final_translation']
-        metadata_json = task_row['metadata_json']
+        # --- Use approved_translation for export --- #
+        # Fallback to final_translation if approved is missing and status is approved_original?
+        approved_tx = task_row['approved_translation']
+        review_status = task_row['review_status']
+        # Only include translation if it was approved (original or edited)
+        translation_to_export = ""
+        if review_status in ['approved_original', 'approved_edited']:
+             translation_to_export = approved_tx if approved_tx is not None else task_row['final_translation'] or "" # Fallback logic
+        # --- End Export Logic Change --- #
         
+        metadata_json = task_row['metadata_json']
         try: metadata = json.loads(metadata_json or '{}')
         except: metadata = {}
-            
         target_col = config.TARGET_COLUMN_TPL.format(lang_code=lang_code)
 
         if row_index not in output_data_dict:
-            # Get source text from the first task encountered for this row
-            # This assumes source text is consistent across tasks for the same row index
-            first_task_for_row = db_manager.get_task_by_row_index(db_path, batch_id, row_index) 
-            source = first_task_for_row['source_text'] if first_task_for_row else "SOURCE_NOT_FOUND"
+            source = task_row['source_text'] or "SOURCE_NOT_FOUND" # Get source directly
             output_data_dict[row_index] = {config.SOURCE_COLUMN: source, **metadata}
         
-        # Add the translation for the specific language
-        output_data_dict[row_index][target_col] = translation
+        # Add the translation to export for the specific language
+        output_data_dict[row_index][target_col] = translation_to_export
 
     # Convert dict to list ordered by row index
     output_data_list = [output_data_dict[idx] for idx in sorted(output_data_dict.keys())]
@@ -913,11 +917,12 @@ def generate_stages_report(batch_id, output_file_path):
         logger.warning(f"No tasks found for stages report (batch {batch_id})")
         # Write empty file with header?
 
-    # Define header for the report
+    # Define header including review status and approved translation
     report_header = [
         'task_id', 'row_index', 'language', 'source', 
         'initial_translation', 'eval_score', 'eval_feedback', 
-        'final_translation', 'final_status', 'error'
+        'final_translation', 'approved_translation', 'review_status', # Added review columns
+        'final_status', 'error'
     ]
 
     try:
@@ -926,7 +931,7 @@ def generate_stages_report(batch_id, output_file_path):
             writer = csv.DictWriter(outfile, fieldnames=report_header, extrasaction='ignore')
             writer.writeheader()
             for task_row in tasks:
-                # Map DB columns to report header names
+                # Map DB columns to report header names (include new ones)
                 row_dict = {
                     'task_id': task_row['task_id'],
                     'row_index': task_row['row_index_in_file'],
@@ -936,6 +941,8 @@ def generate_stages_report(batch_id, output_file_path):
                     'eval_score': task_row['evaluation_score'],
                     'eval_feedback': task_row['evaluation_feedback'],
                     'final_translation': task_row['final_translation'],
+                    'approved_translation': task_row['approved_translation'],
+                    'review_status': task_row['review_status'],
                     'final_status': task_row['status'],
                     'error': task_row['error_message']
                 }

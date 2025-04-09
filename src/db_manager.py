@@ -32,26 +32,67 @@ def initialize_database(db_file_path):
         """)
         logger.info("Table 'Batches' checked/created.")
 
-        # Create TranslationTasks Table
-        cursor.execute("""
+        # Update TranslationTasks Table
+        # Check existing columns first to handle potential re-runs
+        cursor.execute("PRAGMA table_info(TranslationTasks)")
+        existing_columns = [info[1] for info in cursor.fetchall()]
+
+        # Define new columns and modifications
+        schema_updates = {
+            'approved_translation': 'TEXT',
+            'review_status': 'TEXT NOT NULL DEFAULT \'pending_review\'',
+            'reviewed_by': 'TEXT',
+            'review_timestamp': 'DATETIME',
+            'edit_history': 'TEXT' # Add placeholder for future
+        }
+
+        base_create_sql = """
             CREATE TABLE IF NOT EXISTS TranslationTasks (
                 task_id INTEGER PRIMARY KEY AUTOINCREMENT,
                 batch_id TEXT NOT NULL,
-                row_index_in_file INTEGER NOT NULL, -- Original row number (0-based or 1-based? Let's use 0-based internally)
+                row_index_in_file INTEGER NOT NULL, 
                 language_code TEXT NOT NULL,
                 source_text TEXT,
-                status TEXT NOT NULL DEFAULT 'pending', -- pending, running, completed, error, stage1_complete, stage2_complete
+                status TEXT NOT NULL DEFAULT 'pending', 
                 initial_translation TEXT,
                 evaluation_score INTEGER,
                 evaluation_feedback TEXT,
-                final_translation TEXT,
+                final_translation TEXT,              -- LLM's final output
+                approved_translation TEXT,           -- User-approved/edited output
+                review_status TEXT NOT NULL DEFAULT 'pending_review',
+                reviewed_by TEXT,
+                review_timestamp DATETIME,
                 last_updated DATETIME DEFAULT CURRENT_TIMESTAMP,
                 error_message TEXT,
-                metadata_json TEXT, -- Store other columns from input row
+                metadata_json TEXT,
+                edit_history TEXT,                   -- Optional for future
                 FOREIGN KEY (batch_id) REFERENCES Batches (batch_id)
             )
-        """)
-        logger.info("Table 'TranslationTasks' checked/created.")
+        """
+        cursor.execute(base_create_sql)
+        logger.info("Base table 'TranslationTasks' checked/created.")
+
+        # Add new columns if they don't exist
+        for col_name, col_type in schema_updates.items():
+            if col_name not in existing_columns:
+                try:
+                    # Use simplified ALTER TABLE ADD COLUMN
+                    add_column_sql = f"ALTER TABLE TranslationTasks ADD COLUMN {col_name} {col_type}"
+                    # Handle default value separately if needed for existing rows (though default is on create)
+                    if 'DEFAULT' in col_type:
+                        # SQLite requires separate step for default on existing rows usually
+                        # For simplicity, let default only apply to new rows for now.
+                        add_column_sql = f"ALTER TABLE TranslationTasks ADD COLUMN {col_name} {col_type.split('DEFAULT')[0].strip()}"
+                        # TODO: Optionally add an UPDATE statement here if needed
+                    
+                    cursor.execute(add_column_sql)
+                    logger.info(f"Added column '{col_name}' to TranslationTasks.")
+                except sqlite3.OperationalError as e:
+                    # Ignore error if column already exists (might happen in race conditions or reruns)
+                    if "duplicate column name" in str(e):
+                        logger.warning(f"Column '{col_name}' already exists.")
+                    else:
+                        raise e # Re-raise other operational errors
         
         # Add index for faster lookups
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_task_batch_status ON TranslationTasks (batch_id, status)")
@@ -122,9 +163,18 @@ def update_task_status(db_file_path, task_id, new_status, error_msg=None):
         conn.close()
 
 def update_task_results(db_file_path, task_id, status, initial_tx=None, score=None, feedback=None, final_tx=None, error_msg=None):
+    """Updates task results and status. Sets initial review_status if task completed successfully."""
     conn = get_db_connection(db_file_path)
     try:
-        conn.execute("""
+        # Determine initial review status based on final task execution status
+        review_status_update = "" # Don't update review status by default
+        if status == 'completed':
+            # Only set to pending_review if it's not already reviewed
+            # This prevents overwriting an existing review if task is re-run?
+            # Simpler: just set it on completion.
+            review_status_update = ", review_status = 'pending_review'"
+
+        sql = f"""
             UPDATE TranslationTasks 
             SET status = ?, 
                 initial_translation = ?, 
@@ -132,9 +182,12 @@ def update_task_results(db_file_path, task_id, status, initial_tx=None, score=No
                 evaluation_feedback = ?, 
                 final_translation = ?, 
                 error_message = ?, 
-                last_updated = CURRENT_TIMESTAMP 
+                last_updated = CURRENT_TIMESTAMP
+                {review_status_update} 
             WHERE task_id = ?
-            """, (status, initial_tx, score, feedback, final_tx, error_msg, task_id))
+            """
+        params = (status, initial_tx, score, feedback, final_tx, error_msg, task_id)
+        conn.execute(sql, params)
         conn.commit()
     except sqlite3.Error as e:
         logger.error(f"Failed to update results for task {task_id}: {e}")
@@ -142,13 +195,17 @@ def update_task_results(db_file_path, task_id, status, initial_tx=None, score=No
         conn.close()
 
 def get_completed_tasks_for_export(db_file_path, batch_id):
+    """Fetches data needed for final export (uses APPROVED translation)."""
     conn = get_db_connection(db_file_path)
     try:
-        # Fetch all tasks for the batch, ordered by original row index, then language
+        # Fetch tasks that have an approved translation
+        # Or should we fetch all and let generate_export decide?
+        # Let's fetch all relevant data for rows that reached completion, export will use approved.
         cursor = conn.execute("""
-            SELECT row_index_in_file, language_code, final_translation, metadata_json 
+            SELECT row_index_in_file, language_code, approved_translation, final_translation, review_status, metadata_json, source_text 
             FROM TranslationTasks 
             WHERE batch_id = ? 
+            -- Maybe filter by status LIKE 'completed%'?
             ORDER BY row_index_in_file ASC, language_code ASC
             """, (batch_id,))
         tasks = cursor.fetchall()
@@ -226,6 +283,63 @@ def get_batch_info(db_file_path, batch_id):
     except sqlite3.Error as e:
         logger.error(f"Failed to get info for batch {batch_id}: {e}")
         return None
+    finally:
+        conn.close()
+
+def update_review_status(db_file_path, task_id, review_status, approved_translation, user_id=None):
+    """Updates the review status and approved translation for a task."""
+    conn = get_db_connection(db_file_path)
+    try:
+        # Ensure approved_translation is set if status implies approval
+        if review_status in ['approved_original', 'approved_edited'] and approved_translation is None:
+            logger.warning(f"Approved status set for task {task_id} but approved_translation is None. This might be incorrect.")
+            # Optionally fetch final_translation if approved_original?
+        
+        conn.execute("""
+            UPDATE TranslationTasks 
+            SET review_status = ?, 
+                approved_translation = ?, 
+                reviewed_by = ?, 
+                review_timestamp = CURRENT_TIMESTAMP,
+                last_updated = CURRENT_TIMESTAMP
+            WHERE task_id = ?
+            """, (review_status, approved_translation, user_id, task_id))
+        conn.commit()
+        logger.info(f"Updated review status for task {task_id} to {review_status}")
+    except sqlite3.Error as e:
+        logger.error(f"Failed to update review status for task {task_id}: {e}")
+    finally:
+        conn.close()
+
+def get_tasks_for_review(db_file_path, batch_id, language_code=None, review_status_filter=None):
+    """Fetches tasks for review UI, optionally filtering by language and review status."""
+    conn = get_db_connection(db_file_path)
+    try:
+        query = """
+            SELECT task_id, row_index_in_file, language_code, source_text, 
+                   initial_translation, evaluation_score, evaluation_feedback, 
+                   final_translation, approved_translation, review_status, status, error_message
+            FROM TranslationTasks 
+            WHERE batch_id = ? 
+        """
+        params = [batch_id]
+        
+        if language_code:
+            query += " AND language_code = ?"
+            params.append(language_code)
+        
+        if review_status_filter:
+            query += " AND review_status = ?"
+            params.append(review_status_filter)
+            
+        query += " ORDER BY row_index_in_file ASC, language_code ASC"
+        
+        cursor = conn.execute(query, params)
+        tasks = cursor.fetchall()
+        return tasks
+    except sqlite3.Error as e:
+        logger.error(f"Failed to get tasks for review (batch {batch_id}): {e}")
+        return []
     finally:
         conn.close()
 

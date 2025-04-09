@@ -442,26 +442,26 @@ def log_audit_record(record):
 def translate_row_worker(row_data):
     """Worker function to translate a single row based on TRANSLATION_MODE."""
     global translated_counter, error_counter 
-    row, row_index = row_data # Unpack data (system prompts are global now)
+    row, row_index = row_data 
     source_text = row.get(SOURCE_COLUMN, "").strip()
-    final_translation = "" # Initialize
+    final_translation = "" 
     audit_record_base = {
-        "row_index": row_index + 1, # 1-based index for readability
+        "row_index": row_index + 1, 
         "source": source_text,
         "mode": TRANSLATION_MODE,
     }
 
     if not source_text:
         row[TARGET_COLUMN] = ""
-        # Optionally log empty source rows to audit?
+        # Log empty source only if required, otherwise skip
         # log_audit_record({**audit_record_base, "error": "Empty source text"})
-        return row # Return unmodified row if source is empty
+        return row 
 
     try:
         if TRANSLATION_MODE == "ONE_STAGE":
             # Use DEFAULT_API and its default model (no override needed here)
             api_to_use = DEFAULT_API
-            model_to_use = None # Use default model for the API
+            model_to_use = None 
             audit_record = {**audit_record_base, "api": api_to_use, "model": model_to_use or "default"} 
             
             final_translation = call_active_api(api_to_use, stage1_system_prompt, source_text, 
@@ -471,66 +471,102 @@ def translate_row_worker(row_data):
                 audit_record["final_translation"] = final_translation
             else:
                 with print_lock: error_counter += 1
-                final_translation = "" # Use empty string on error
+                final_translation = "" 
                 audit_record["error"] = "Stage 1 API call failed after retries"
-            
-            # Log one-stage result to audit file
             log_audit_record(audit_record)
 
         elif TRANSLATION_MODE == "THREE_STAGE":
-            # --- Three Stage Workflow --- 
-            # Stage 1: Initial Translation
+            # --- Stage 1: Initial Translation --- 
             s1_api = STAGE1_API
-            s1_model = STAGE1_MODEL_OVERRIDE # Can be None
+            s1_model = STAGE1_MODEL_OVERRIDE 
             audit_record = {**audit_record_base, "stage1_api": s1_api, "stage1_model": s1_model or "default"}
             initial_translation = call_active_api(s1_api, stage1_system_prompt, source_text, 
                                                 row_identifier=f"{row_index + 2}-S1", model_override=s1_model)
             audit_record["initial_translation"] = initial_translation
 
             if initial_translation is None:
-                # If stage 1 fails, cannot proceed. Log error and use empty final translation.
                 with print_lock: error_counter += 1
-                final_translation = ""
+                final_translation = "" 
                 audit_record["error"] = "Stage 1 API call failed after retries"
                 log_audit_record(audit_record)
             else:
-                # Stage 2: Evaluation
-                # Prepare evaluation prompt (needs proper templating)
-                # Basic example, replace placeholders correctly later
-                eval_prompt = stage2_system_prompt.replace("<<RULES>>", "[Rules Not Inserted Yet]") # Placeholder
-                eval_input = f"Source: {source_text}\nTranslation: {initial_translation}"
-                evaluation = call_active_api(STAGE2_API, eval_prompt, eval_input, 
-                                           row_identifier=f"{row_index + 2}-S2", model_override=STAGE2_MODEL_OVERRIDE)
-                audit_record["evaluation"] = evaluation
+                # --- Stage 2: Evaluation --- 
+                s2_api = STAGE2_API
+                s2_model = STAGE2_MODEL_OVERRIDE
+                audit_record["stage2_api"] = s2_api
+                audit_record["stage2_model"] = s2_model or "default"
+                
+                # Construct Stage 2 Prompt 
+                # Ensure stage2_system_prompt is loaded
+                if not stage2_system_prompt:
+                    raise ValueError("Stage 2 system prompt not loaded.")
+                # Inject the base rules (stage1 prompt without final instruction)
+                base_rules = stage1_system_prompt.split("**IMPORTANT FINAL INSTRUCTION:")[0].strip()
+                eval_system_prompt = stage2_system_prompt.replace("<<RULES>>", base_rules) 
+                # Create user content for evaluation stage
+                eval_user_content = f"SOURCE_TEXT:\n{source_text}\n\nINITIAL_TRANSLATION:\n{initial_translation}"
+                
+                evaluation_raw = call_active_api(s2_api, eval_system_prompt, eval_user_content, 
+                                           row_identifier=f"{row_index + 2}-S2", model_override=s2_model)
+                
+                # Attempt to parse the JSON evaluation
+                evaluation_score = None
+                evaluation_feedback = None
+                if evaluation_raw:
+                    try:
+                        eval_data = json.loads(evaluation_raw)
+                        evaluation_score = eval_data.get("score")
+                        evaluation_feedback = eval_data.get("feedback")
+                        if not isinstance(evaluation_score, int) or not isinstance(evaluation_feedback, str):
+                            raise ValueError("Invalid format in evaluation JSON")
+                    except (json.JSONDecodeError, ValueError) as e:
+                        with print_lock:
+                            print(f"Warning [Row {row_index + 2}-S2]: Failed to parse evaluation JSON ({e}). Raw: {evaluation_raw}")
+                        evaluation_feedback = f"Evaluation parsing failed. Raw output: {evaluation_raw}" # Use raw output as feedback
+                        evaluation_score = None # Mark score as unknown
+                
+                audit_record["evaluation_score"] = evaluation_score
+                audit_record["evaluation_feedback"] = evaluation_feedback
 
-                if evaluation is None:
-                    # If stage 2 fails, use Stage 1 translation as final
+                if evaluation_feedback is None: # Check if the API call itself failed
                     final_translation = initial_translation
-                    with print_lock: translated_counter += 1 # Count Stage 1 as success in this case
-                    audit_record["error"] = "Stage 2 API call failed after retries, using Stage 1 result"
-                    audit_record["final_translation"] = final_translation # Log stage 1 result as final
+                    with print_lock: translated_counter += 1 
+                    audit_record["error"] = "Stage 2 API call failed, using Stage 1 result"
+                    audit_record["final_translation"] = final_translation 
                     log_audit_record(audit_record)
-                else:
-                    # Stage 3: Refinement
-                    # Prepare refinement prompt (needs proper templating)
-                    refine_prompt = stage3_system_prompt.replace("<<SOURCE>>", source_text)\
-                                                        .replace("<<INITIAL>>", initial_translation)\
-                                                        .replace("<<FEEDBACK>>", evaluation)
-                    # The user content for refine is often just the instruction to refine based on context
-                    # Or sometimes the refine prompt itself contains all context. Let's assume the latter for now.
-                    final_translation = call_active_api(STAGE3_API, refine_prompt, "Refine the translation based on the provided feedback.", 
-                                                      row_identifier=f"{row_index + 2}-S3", model_override=STAGE3_MODEL_OVERRIDE)
+                # Decide if refinement is needed (e.g., score < 10 or specific feedback exists) 
+                # Let's proceed to stage 3 regardless for now, unless stage 2 failed entirely.
+                else: 
+                    # --- Stage 3: Refinement --- 
+                    s3_api = STAGE3_API
+                    s3_model = STAGE3_MODEL_OVERRIDE
+                    audit_record["stage3_api"] = s3_api
+                    audit_record["stage3_model"] = s3_model or "default"
+                    
+                    # Construct Stage 3 Prompt
+                    if not stage3_system_prompt:
+                        raise ValueError("Stage 3 system prompt not loaded.")
+                    # Inject base rules again
+                    refine_system_prompt_template = stage3_system_prompt.replace("<<RULES>>", base_rules)
+                    # Inject dynamic content
+                    refine_system_prompt = refine_system_prompt_template.replace("<<SOURCE_TEXT>>", source_text)\
+                                                                   .replace("<<INITIAL_TRANSLATION>>", initial_translation)\
+                                                                   .replace("<<FEEDBACK>>", evaluation_feedback or "No specific feedback provided.")
+                                                                   
+                    # User content for stage 3 can be simple, as context is in system prompt
+                    refine_user_content = "Revise the translation based on the provided context and feedback."
+                    
+                    final_translation = call_active_api(s3_api, refine_system_prompt, refine_user_content, 
+                                                      row_identifier=f"{row_index + 2}-S3", model_override=s3_model)
                     audit_record["final_translation"] = final_translation
 
                     if final_translation is None:
-                        # If stage 3 fails, use Stage 1 translation as final
                         final_translation = initial_translation 
-                        with print_lock: translated_counter += 1 # Count Stage 1 as success
-                        audit_record["error"] = "Stage 3 API call failed after retries, using Stage 1 result"
-                        audit_record["final_translation"] = final_translation # Log stage 1 result as final again
+                        with print_lock: translated_counter += 1
+                        audit_record["error"] = "Stage 3 API call failed, using Stage 1 result"
+                        audit_record["final_translation"] = final_translation
                     else:
-                         with print_lock: translated_counter += 1 # Count final stage 3 as success
-                    
+                         with print_lock: translated_counter += 1 
                     log_audit_record(audit_record)
         else:
              with print_lock: print(f"Error: Unknown TRANSLATION_MODE '{TRANSLATION_MODE}'")

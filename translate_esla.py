@@ -12,6 +12,7 @@ import concurrent.futures
 import threading
 import random
 from tqdm import tqdm # Added for progress bar
+import json # Added for audit logging
 
 # Load environment variables from .env file
 load_dotenv()
@@ -50,6 +51,15 @@ SOURCE_COLUMN = "src_enUS"
 TARGET_COLUMN = f"tg_{LANGUAGE_CODE}" 
 # --- End CSV Configuration ---
 
+# --- Workflow Configuration ---
+TRANSLATION_MODE = os.getenv("TRANSLATION_MODE", "ONE_STAGE").upper()
+AUDIT_LOG_FILE = os.getenv("AUDIT_LOG_FILE", f"output/audit_log_{LANGUAGE_CODE}_{ACTIVE_API.lower()}.jsonl")
+# Define system prompt file paths
+STAGE1_PROMPT_FILE = f"system_prompts/tg_{LANGUAGE_CODE}.md"
+STAGE2_PROMPT_FILE = f"system_prompts/stage2_evaluate_{LANGUAGE_CODE}.md"
+STAGE3_PROMPT_FILE = f"system_prompts/stage3_refine_{LANGUAGE_CODE}.md"
+# --- End Workflow Configuration ---
+
 # --- Threading and Retry Configuration ---
 # Use environment variables with defaults
 MAX_WORKER_THREADS_STR = os.getenv("MAX_WORKER_THREADS", "8")
@@ -73,15 +83,39 @@ THREAD_STAGGER_DELAY = float(THREAD_STAGGER_DELAY_STR.split('#')[0].strip())
 print_lock = threading.Lock()
 translated_counter = 0
 error_counter = 0
+stage1_system_prompt = None # Load prompts globally once
+stage2_system_prompt = None
+stage3_system_prompt = None
 
-def load_system_prompt(filepath):
-    """Loads the system prompt from a file."""
+def load_system_prompts():
+    """Loads all necessary system prompts."""
+    global stage1_system_prompt, stage2_system_prompt, stage3_system_prompt
+    
+    print(f"Loading Stage 1 prompt from {STAGE1_PROMPT_FILE}...")
+    stage1_system_prompt = load_single_prompt(STAGE1_PROMPT_FILE)
+    # Append the crucial final instruction directly to the loaded prompt
+    final_instruction = "\n\n**IMPORTANT FINAL INSTRUCTION: Your final output should contain ONLY the translated text (or evaluation, depending on the stage) for the given input string. Do not include any other information, explanations, thinking processes (like <think> blocks), or formatting.**"
+    stage1_system_prompt += final_instruction
+
+    if TRANSLATION_MODE == "THREE_STAGE":
+        print(f"Loading Stage 2 prompt from {STAGE2_PROMPT_FILE}...")
+        stage2_system_prompt = load_single_prompt(STAGE2_PROMPT_FILE)
+        stage2_system_prompt += final_instruction # Also add instruction here
+        
+        print(f"Loading Stage 3 prompt from {STAGE3_PROMPT_FILE}...")
+        stage3_system_prompt = load_single_prompt(STAGE3_PROMPT_FILE)
+        stage3_system_prompt += final_instruction # And here
+        
+
+def load_single_prompt(filepath):
+    """Loads a single system prompt from a file."""
     try:
         with open(filepath, 'r', encoding='utf-8') as f:
             return f.read()
     except FileNotFoundError:
         print(f"Error: System prompt file {filepath} not found.")
-        exit(1)
+        # Exit if essential stage 1 prompt is missing, maybe allow missing stage 2/3?
+        exit(1) 
     except Exception as e:
         print(f"Error reading system prompt file {filepath}: {e}")
         exit(1)
@@ -364,89 +398,185 @@ def call_active_api(system_prompt, user_content, row_identifier="N/A"):
             print(f"Error: Unsupported ACTIVE_API value '{ACTIVE_API}' in .env file.")
         return None # Or raise an error
 
+# --- Audit Logging --- 
+def log_audit_record(record):
+    """Appends a JSON record to the audit log file in a thread-safe manner."""
+    try:
+        with print_lock:
+            with open(AUDIT_LOG_FILE, 'a', encoding='utf-8') as f:
+                json.dump(record, f, ensure_ascii=False)
+                f.write('\n')
+    except Exception as e:
+        with print_lock:
+            print(f"Error writing to audit log: {e}")
+
 # --- Worker and CSV Processing --- 
 
 def translate_row_worker(row_data):
-    """Worker function to translate a single row using the active API."""
+    """Worker function to translate a single row based on TRANSLATION_MODE."""
     global translated_counter, error_counter 
-    row, row_index, system_prompt = row_data 
+    row, row_index = row_data # Unpack data (system prompts are global now)
     source_text = row.get(SOURCE_COLUMN, "").strip()
-        
-    translated_text = None
-    if source_text:
-        # Use the dispatcher
-        translated_text = call_active_api(system_prompt, source_text, row_identifier=row_index + 2)
-        
-        with print_lock: 
-            if translated_text is not None:
-                translated_counter += 1
+    final_translation = "" # Initialize
+    audit_record = {
+        "row_index": row_index + 1, # 1-based index for readability
+        "source": source_text,
+        "api": ACTIVE_API,
+        "mode": TRANSLATION_MODE,
+        "initial_translation": None,
+        "evaluation": None,
+        "final_translation": None,
+        "error": None
+    }
+
+    if not source_text:
+        row[TARGET_COLUMN] = ""
+        # Optionally log empty source rows to audit?
+        # log_audit_record({**audit_record, "error": "Empty source text"})
+        return row # Return unmodified row if source is empty
+
+    try:
+        if TRANSLATION_MODE == "ONE_STAGE":
+            # --- One Stage Workflow --- 
+            final_translation = call_active_api(stage1_system_prompt, source_text, row_identifier=row_index + 2)
+            if final_translation is not None:
+                with print_lock: translated_counter += 1
+                audit_record["final_translation"] = final_translation
             else:
-                error_counter += 1
-                translated_text = "" 
-    else:
-        translated_text = ""
-        
-    # Use the dynamically determined target column name
-    row[TARGET_COLUMN] = translated_text 
+                with print_lock: error_counter += 1
+                final_translation = "" # Use empty string on error
+                audit_record["error"] = "Stage 1 API call failed after retries"
+            
+            # Log one-stage result to audit file
+            log_audit_record(audit_record)
+
+        elif TRANSLATION_MODE == "THREE_STAGE":
+            # --- Three Stage Workflow --- 
+            # Stage 1: Initial Translation
+            initial_translation = call_active_api(stage1_system_prompt, source_text, row_identifier=f"{row_index + 2}-S1")
+            audit_record["initial_translation"] = initial_translation
+
+            if initial_translation is None:
+                # If stage 1 fails, cannot proceed. Log error and use empty final translation.
+                with print_lock: error_counter += 1
+                final_translation = ""
+                audit_record["error"] = "Stage 1 API call failed after retries"
+                log_audit_record(audit_record)
+            else:
+                # Stage 2: Evaluation
+                # Prepare evaluation prompt (needs proper templating)
+                # Basic example, replace placeholders correctly later
+                eval_prompt = stage2_system_prompt.replace("<<RULES>>", "[Rules Not Inserted Yet]") # Placeholder
+                eval_input = f"Source: {source_text}\nTranslation: {initial_translation}"
+                evaluation = call_active_api(eval_prompt, eval_input, row_identifier=f"{row_index + 2}-S2")
+                audit_record["evaluation"] = evaluation
+
+                if evaluation is None:
+                    # If stage 2 fails, use Stage 1 translation as final
+                    final_translation = initial_translation
+                    with print_lock: translated_counter += 1 # Count Stage 1 as success in this case
+                    audit_record["error"] = "Stage 2 API call failed after retries, using Stage 1 result"
+                    audit_record["final_translation"] = final_translation # Log stage 1 result as final
+                    log_audit_record(audit_record)
+                else:
+                    # Stage 3: Refinement
+                    # Prepare refinement prompt (needs proper templating)
+                    refine_prompt = stage3_system_prompt.replace("<<SOURCE>>", source_text)\
+                                                        .replace("<<INITIAL>>", initial_translation)\
+                                                        .replace("<<FEEDBACK>>", evaluation)
+                    # The user content for refine is often just the instruction to refine based on context
+                    # Or sometimes the refine prompt itself contains all context. Let's assume the latter for now.
+                    final_translation = call_active_api(refine_prompt, "Refine the translation based on the provided feedback.", row_identifier=f"{row_index + 2}-S3")
+                    audit_record["final_translation"] = final_translation
+
+                    if final_translation is None:
+                        # If stage 3 fails, use Stage 1 translation as final
+                        final_translation = initial_translation 
+                        with print_lock: translated_counter += 1 # Count Stage 1 as success
+                        audit_record["error"] = "Stage 3 API call failed after retries, using Stage 1 result"
+                        audit_record["final_translation"] = final_translation # Log stage 1 result as final again
+                    else:
+                         with print_lock: translated_counter += 1 # Count final stage 3 as success
+                    
+                    log_audit_record(audit_record)
+        else:
+             with print_lock: print(f"Error: Unknown TRANSLATION_MODE '{TRANSLATION_MODE}'")
+             error_counter += 1
+             final_translation = "" 
+             audit_record["error"] = f"Unknown TRANSLATION_MODE: {TRANSLATION_MODE}"
+             log_audit_record(audit_record)
+
+    except Exception as e:
+        # Catch unexpected errors within the worker's logic
+        with print_lock:
+            print(f"Critical Error in worker for row {row_index+2}: {e}")
+        error_counter += 1
+        final_translation = "" # Ensure it's empty on critical worker error
+        audit_record["error"] = f"Critical worker error: {e}"
+        log_audit_record(audit_record)
+
+    # --- Update the row for the main CSV output --- 
+    row[TARGET_COLUMN] = final_translation 
     return row 
 
-def translate_csv(input_file, output_file, system_prompt):
-    """Reads input CSV, translates using active API via threads, writes to output CSV.""" # Updated docstring
+def translate_csv(input_file, output_file):
+    """Reads input CSV, translates based on mode via threads, writes output CSV & audit log."""
     global translated_counter, error_counter 
     translated_counter = 0
     error_counter = 0
     processed_rows = []
     
+    # Clear audit log file at the start of a run
+    try:
+        open(AUDIT_LOG_FILE, 'w').close() 
+        print(f"Cleared previous audit log: {AUDIT_LOG_FILE}")
+    except Exception as e:
+        print(f"Warning: Could not clear audit log file {AUDIT_LOG_FILE}: {e}")
+
     try:
         with open(input_file, 'r', encoding='utf-8') as infile:
             reader = csv.DictReader(infile)
-            # Check for source column, target column check is implicit as it's generated
             if SOURCE_COLUMN not in reader.fieldnames:
                  print(f"Error: Input CSV must contain source column '{SOURCE_COLUMN}'.")
                  exit(1)
-            # We need the fieldnames for the writer later
-            # IMPORTANT: The TARGET_COLUMN might not exist in the *input* fieldnames
             fieldnames = reader.fieldnames
             if TARGET_COLUMN not in fieldnames:
                 print(f"Info: Target column '{TARGET_COLUMN}' not found in input, will be added.")
-                fieldnames = list(fieldnames) + [TARGET_COLUMN] # Ensure target column is in output header
-                
-            rows_to_process = [(row, index, system_prompt) for index, row in enumerate(reader)]
+                fieldnames = list(fieldnames) + [TARGET_COLUMN] 
+            # Pass only row and index to worker, prompts are global
+            rows_to_process = [(row, index) for index, row in enumerate(reader)]
         
         total_rows = len(rows_to_process)
+        print(f"Using Mode: {TRANSLATION_MODE}")
         print(f"Translating {total_rows} rows using {ACTIVE_API} (up to {MAX_WORKER_THREADS} threads)... Output: {output_file}")
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKER_THREADS) as executor:
             futures = [executor.submit(translate_row_worker, row_data) for row_data in rows_to_process]
-            for future in tqdm(concurrent.futures.as_completed(futures), total=total_rows, desc=f"Translating ({ACTIVE_API})"):
+            for future in tqdm(concurrent.futures.as_completed(futures), total=total_rows, desc=f"Translating ({ACTIVE_API} - {TRANSLATION_MODE})"):
                 try:
                     processed_rows.append(future.result()) 
                 except Exception as e:
+                    # This catches errors during future.result() retrieval, less likely now with try/except in worker
                     with print_lock:
-                        print(f"Error processing future result: {e}")
-                    error_counter += 1 
+                        print(f"Error retrieving future result: {e}")
+                    # How to handle this? We don't have the row context easily here.
+                    # Maybe increment a separate 'future retrieval error' counter.
         
-        # Sort results back to original order based on how they were submitted
-        # Since futures were created in order and results appended as completed, we need sorting.
-        # We need the original index associated with each result for sorting.
-        # --> Modify translate_row_worker to return (index, row)
-        # --> Let's skip sorting for now to keep it simpler, assuming order is maintained enough.
-        # --> If strict order needed, MUST implement index tracking and sorting.
+        # TODO: Add sorting if strict order is required
 
-        print("\nWriting results to output file...")
+        print("\nWriting results to main output file...")
         with open(output_file, 'w', encoding='utf-8', newline='') as outfile:
-            # Use the potentially modified fieldnames list that includes the target column
             writer = csv.DictWriter(outfile, fieldnames=fieldnames)
             writer.writeheader()
-            # Filter out None results if any future failed exceptionally before returning row
-            valid_rows = [row for row in processed_rows if row is not None]
+            valid_rows = [row for row in processed_rows if row is not None] 
             writer.writerows(valid_rows) 
 
         print(f"\nTranslation process completed.")
         print(f"Total rows processed: {total_rows}")
-        print(f"Rows successfully translated: {translated_counter}")
-        print(f"Rows failed after retries: {error_counter}")
-        print(f"Output saved to: {output_file}")
+        print(f"Rows resulting in successful final translation: {translated_counter}")
+        print(f"Rows encountering errors: {error_counter}")
+        print(f"Main output saved to: {output_file}")
+        print(f"Detailed audit log saved to: {AUDIT_LOG_FILE}")
 
     except FileNotFoundError:
         print(f"Error: Input CSV file not found at {input_file}")
@@ -480,12 +610,8 @@ if __name__ == "__main__":
             print(f"Critical Error: Failed to initialize OpenAI client: {e}. Exiting.")
             exit(1)
             
-    print(f"Loading system prompt from {SYSTEM_PROMPT_FILE}...")
-    system_prompt_content = load_system_prompt(SYSTEM_PROMPT_FILE)
-    
-    # Append the crucial final instruction directly to the loaded prompt
-    # This should apply universally to both APIs
-    final_instruction = "\n\n**IMPORTANT FINAL INSTRUCTION: Your final output should contain ONLY the translated text for the given input string. Do not include any other information, explanations, thinking processes (like <think> blocks), or formatting.**"
-    system_prompt_content += final_instruction
-    
-    translate_csv(INPUT_CSV, OUTPUT_CSV, system_prompt_content) 
+    # Load system prompts based on mode
+    load_system_prompts()
+        
+    # Run the main translation process (prompts are now global)
+    translate_csv(INPUT_CSV, OUTPUT_CSV) 

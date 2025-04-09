@@ -1,4 +1,6 @@
 .venv
 .env
 output/
+/translation_jobs.db
+/system_prompts/archive/
 .cursor/ 

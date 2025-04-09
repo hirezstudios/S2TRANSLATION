@@ -230,9 +230,10 @@ def run_translation_thread(file_path, selected_langs, mode_config):
         st.session_state['batch_status'] = 'failed'
         logger.exception(f"Error during background translation thread: {e}")
     finally:
-        # Clean up thread object in session state?
-        # st.session_state['processing_thread'] = None # Careful with race conditions
-        st.rerun() # Use current rerun API
+        # Thread finished (successfully or with error)
+        # The main thread will detect completion and trigger the rerun
+        # st.rerun() # DO NOT rerun from background thread
+        pass
 
 # Disable button if processing
 disable_start = st.session_state['batch_status'] in ['preparing', 'processing']
@@ -296,14 +297,24 @@ if st.button("Start Translation Job", disabled=disable_start):
         thread.start()
         st.rerun() # Use current rerun API
 
+# Check if a thread is running and has finished
+if 'processing_thread' in st.session_state and st.session_state['processing_thread'] is not None:
+    if not st.session_state['processing_thread'].is_alive():
+        # Thread has finished, trigger a rerun to update UI based on final status set by thread
+        logger.info("Background thread finished, triggering UI update.")
+        st.session_state['processing_thread'] = None # Clear the thread object
+        st.rerun() 
+
 # Display Status / Progress
 if st.session_state['batch_status'] == 'preparing':
-    st.info(f"Preparing batch...") # Keep simple
+    st.info(f"Preparing batch...") 
+    # Add a spinner here too while preparing?
+    with st.spinner("Preparing..."):
+        pass # Keep spinner until status changes
 elif st.session_state['batch_status'] == 'processing':
-    # Display Batch ID clearly
     st.info(f"Processing Batch ID: {st.session_state.get('current_batch_id', 'N/A')}...") 
     with st.spinner("Translating..."): 
-        pass 
+        pass # Keep spinner running while processing
 elif st.session_state['batch_status'] == 'completed':
     st.success(f"Batch {st.session_state.get('current_batch_id', 'N/A')} completed successfully!")
 elif st.session_state['batch_status'] == 'completed_with_errors':

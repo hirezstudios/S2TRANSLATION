@@ -325,8 +325,55 @@ def create_app():
 
         except Exception as e:
             logger.exception(f"Error fetching results for batch {batch_id}: {e}")
-            # Render an error page?
             return "An error occurred while fetching results.", 500
+
+    @app.route('/review_task/<int:task_id>', methods=['POST'])
+    def review_task(task_id):
+        """Handles updates to a task's review status and approved translation."""
+        logger.info(f"Received review update for task_id: {task_id}")
+        db_path = config.DATABASE_FILE
+        try:
+            data = request.get_json()
+            if not data:
+                return jsonify({"error": "Invalid request body"}), 400
+
+            new_review_status = data.get('review_status')
+            # Approved translation can be None (for deny) or empty string
+            approved_translation = data.get('approved_translation') 
+            user_id = "webapp" # Placeholder for user ID
+
+            # --- Validation --- #
+            allowed_statuses = ['approved_original', 'approved_edited', 'denied']
+            if not new_review_status or new_review_status not in allowed_statuses:
+                logger.warning(f"Invalid review status received: {new_review_status}")
+                return jsonify({"error": "Invalid review status provided"}), 400
+            
+            if new_review_status == 'approved_edited' and approved_translation is None:
+                 logger.warning(f"Review status 'approved_edited' received for task {task_id} but approved_translation is missing.")
+                 # Allow empty string, but not None if status is edited
+                 # return jsonify({"error": "Approved translation text is required for edited status"}), 400
+                 # Let's allow saving empty string if user explicitly clears it?
+
+            if new_review_status == 'denied' and approved_translation is not None:
+                 logger.warning(f"Review status 'denied' received for task {task_id} but approved_translation is not None. Setting to None.")
+                 approved_translation = None # Ensure it's null if denied
+                 
+            # --- End Validation --- #
+            
+            # Call DB manager to update
+            db_manager.update_review_status(
+                db_path, 
+                task_id, 
+                new_review_status, 
+                approved_translation, 
+                user_id
+            )
+            
+            return jsonify({"success": True, "message": "Review status updated successfully"}), 200
+
+        except Exception as e:
+            logger.exception(f"Error updating review status for task {task_id}: {e}")
+            return jsonify({"error": "An internal error occurred while saving the review."}), 500
 
     # Placeholder for other routes: /rules
     @app.route('/placeholder')

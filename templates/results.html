@@ -181,10 +181,16 @@
                          approved_translation: payload.approved_translation
                     });                   
                     // TODO: Show success toast message
+                    // Simple alert for now:
+                    // alert("Review status saved!"); 
+                    // Highlight row briefly?
+                    row.getElement().style.backgroundColor = "#d1ecf1"; // Light blue info highlight
+                    setTimeout(() => { row.getElement().style.backgroundColor = ""; }, 1500); 
                 } else {
                     console.error("Review update failed:", data);
                     alert(`Error updating review: ${data.error || response.statusText}`);
                     // Optionally revert cell change if edit failed?
+                    // Example: row.update({approved_translation: row.getData().approved_translation}); // Revert to previous data
                 }
             } catch (error) {
                 console.error('Network error updating review:', error);

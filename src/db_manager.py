@@ -316,11 +316,26 @@ def update_review_status(db_file_path, task_id, review_status, approved_translat
     """Updates the review status and approved translation for a task."""
     conn = get_db_connection(db_file_path)
     try:
-        # Ensure approved_translation is set if status implies approval
-        if review_status in ['approved_original', 'approved_edited'] and approved_translation is None:
-            logger.warning(f"Approved status set for task {task_id} but approved_translation is None. This might be incorrect.")
-            # Optionally fetch final_translation if approved_original?
-        
+        # Ensure approved_translation is set correctly based on status
+        if review_status == 'denied':
+            approved_translation_to_save = None # Store NULL for denied
+        elif review_status == 'approved_original':
+             # Fetch final_translation if approved_translation not provided directly (should be provided by JS now)
+             if approved_translation is None:
+                 cursor = conn.execute("SELECT final_translation FROM TranslationTasks WHERE task_id = ?", (task_id,))
+                 result = cursor.fetchone()
+                 approved_translation_to_save = result['final_translation'] if result else None
+                 logger.warning(f"Approved_original for task {task_id} - fetched final_translation from DB.")
+             else:
+                 approved_translation_to_save = approved_translation
+        elif review_status == 'approved_edited':
+            # Use the text provided, which could be an empty string
+             approved_translation_to_save = approved_translation
+        else:
+            # Should not happen due to validation in Flask route, but handle defensively
+             logger.error(f"Invalid review_status '{review_status}' passed to update_review_status for task {task_id}")
+             return # Don't proceed
+
         conn.execute("""
             UPDATE TranslationTasks 
             SET review_status = ?, 
@@ -329,7 +344,7 @@ def update_review_status(db_file_path, task_id, review_status, approved_translat
                 review_timestamp = CURRENT_TIMESTAMP,
                 last_updated = CURRENT_TIMESTAMP
             WHERE task_id = ?
-            """, (review_status, approved_translation, user_id, task_id))
+            """, (review_status, approved_translation_to_save, user_id, task_id))
         conn.commit()
         logger.info(f"Updated review status for task {task_id} to {review_status}")
     except sqlite3.Error as e:

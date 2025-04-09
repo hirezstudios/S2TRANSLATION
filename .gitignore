@@ -3,4 +3,7 @@
 output/
 /translation_jobs.db
 /system_prompts/archive/
-.cursor/ 
+.cursor/
+__pycache__/
+*.pyc
+temp_uploads/ 

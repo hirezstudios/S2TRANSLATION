@@ -3,7 +3,11 @@ import csv
 import requests
 from dotenv import load_dotenv
 import time
-import re # Add import for regex
+import re 
+import concurrent.futures
+import threading
+import random
+from tqdm import tqdm # Added for progress bar
 
 # Load environment variables from .env file
 load_dotenv()
@@ -17,9 +21,21 @@ OUTPUT_CSV = "output/blake-small_esLA.csv"
 SYSTEM_PROMPT_FILE = "system_prompts/tg_esLA.md"
 SOURCE_COLUMN = "src_enUS"
 TARGET_COLUMN = "tg_esLA"
-# Add a small delay between API calls to avoid rate limiting
-REQUEST_DELAY_SECONDS = 1 
+
+# --- Threading and Retry Configuration ---
+# Use environment variables with defaults
+MAX_WORKER_THREADS = int(os.getenv("MAX_WORKER_THREADS", 8))
+API_MAX_RETRIES = int(os.getenv("API_MAX_RETRIES", 3))
+# Convert delays to float
+API_INITIAL_RETRY_DELAY = float(os.getenv("API_INITIAL_RETRY_DELAY", 5.0))
+API_MAX_RETRY_DELAY = float(os.getenv("API_MAX_RETRY_DELAY", 60.0))
+THREAD_STAGGER_DELAY = float(os.getenv("THREAD_STAGGER_DELAY", 1.0)) 
 # --- End Configuration ---
+
+# Thread-safe lock for printing and counters if needed (especially with tqdm)
+print_lock = threading.Lock()
+translated_counter = 0
+error_counter = 0
 
 def load_system_prompt(filepath):
     """Loads the system prompt from a file."""
@@ -33,14 +49,19 @@ def load_system_prompt(filepath):
         print(f"Error reading system prompt file: {e}")
         exit(1)
 
-def call_perplexity_api(system_prompt, user_content):
-    """Calls the Perplexity API for translation and parses the output."""
+def call_perplexity_api(system_prompt, user_content, row_identifier="N/A"):
+    """Calls the Perplexity API for translation with retry logic and parses the output."""
     if not API_KEY:
-        print("Error: PERPLEXITY_API_KEY not found in .env file.")
-        exit(1)
+        # This check might be redundant if done globally, but safe to keep
+        with print_lock:
+            print("Error: PERPLEXITY_API_KEY not found in .env file.")
+        # Don't exit here, let the retry logic handle potential setup issues if needed
+        # Or perhaps exit(1) is still appropriate? For now, let it return None.
+        return None 
     if not MODEL:
-        print("Error: PERPLEXITY_MODEL not found in .env file.")
-        exit(1)
+        with print_lock:
+            print("Error: PERPLEXITY_MODEL not found in .env file.")
+        return None
         
     headers = {
         "Authorization": f"Bearer {API_KEY}",
@@ -53,136 +74,153 @@ def call_perplexity_api(system_prompt, user_content):
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_content}
         ],
-        "temperature": 0.2 # Keep it deterministic for translation
+        "temperature": 0.2 
     }
 
-    try:
-        response = requests.post(API_URL, json=payload, headers=headers)
-        response.raise_for_status() # Raise an exception for bad status codes
-        data = response.json()
-        
-        # --- Remove START TEMP DEBUGGING ---
-        # print("--- Raw API Response ---")
-        # print(data)
-        # print("--- End Raw API Response ---")
-        # --- Remove END TEMP DEBUGGING ---
-
-        # Extract the raw content from the response
-        raw_content = "" # Default to empty string
-        if data.get("choices") and len(data["choices"]) > 0:
-            raw_content = data["choices"][0].get("message", {}).get("content", "")
-
-        # Parse the content to remove <think> blocks
-        if raw_content:
-            # Use regex to remove the <think> block and any surrounding newlines/whitespace
-            parsed_content = re.sub(r"<think>.*?</think>\s*", "", raw_content, flags=re.DOTALL).strip()
+    current_retry_delay = API_INITIAL_RETRY_DELAY
+    for attempt in range(API_MAX_RETRIES + 1):
+        try:
+            response = requests.post(API_URL, json=payload, headers=headers, timeout=30) # Added timeout
             
-            if parsed_content:
-                return parsed_content
+            # Handle specific HTTP errors
+            if response.status_code == 429: # Rate limit exceeded
+                raise requests.exceptions.RequestException(f"Rate limit exceeded (429)")
+            
+            response.raise_for_status() # Raise an exception for other bad status codes (4xx, 5xx)
+            
+            data = response.json()
+            raw_content = ""
+            if data.get("choices") and len(data["choices"]) > 0:
+                raw_content = data["choices"][0].get("message", {}).get("content", "")
+
+            if raw_content:
+                parsed_content = re.sub(r"<think>.*?</think>\s*", "", raw_content, flags=re.DOTALL).strip()
+                if parsed_content:
+                    return parsed_content # Success!
+                else:
+                    with print_lock:
+                        print(f"Warning [Row {row_identifier}]: Translation empty after parsing <think> block.")
+                        # print(f"Original Response: {raw_content}") # Maybe too verbose
+                    return "" # Return empty string if parsing resulted in empty content
             else:
-                print(f"Warning: Translation was empty after removing <think> block for: {user_content}")
-                print(f"Original Response Content: {raw_content}")
-                return "" # Return empty string if parsing resulted in empty content
+                 with print_lock:
+                     print(f"Warning [Row {row_identifier}]: Empty or unexpected API response structure.")
+                     # print(f"Response: {data}") # Maybe too verbose
+                 return "" # Return empty string if structure is wrong
+
+        except requests.exceptions.Timeout:
+            with print_lock:
+                print(f"Attempt {attempt + 1}/{API_MAX_RETRIES + 1} [Row {row_identifier}]: API call timed out.")
+        except requests.exceptions.RequestException as e:
+            with print_lock:
+                print(f"Attempt {attempt + 1}/{API_MAX_RETRIES + 1} [Row {row_identifier}]: API Error - {e}")
+        except Exception as e:
+            # Catch any other unexpected errors during the process
+            with print_lock:
+                print(f"Attempt {attempt + 1}/{API_MAX_RETRIES + 1} [Row {row_identifier}]: Unexpected Error - {e}")
+
+        # If we reached here, an error occurred or parsing failed; prepare for retry
+        if attempt < API_MAX_RETRIES:
+            # Exponential backoff with jitter
+            wait_time = min(current_retry_delay + random.uniform(0, 1), API_MAX_RETRY_DELAY)
+            with print_lock:
+                print(f"Retrying [Row {row_identifier}] in {wait_time:.2f} seconds...")
+            time.sleep(wait_time)
+            current_retry_delay *= 2 # Double the base delay for next potential retry
         else:
-             print(f"Warning: Empty or unexpected API response structure for: {user_content}")
-             print(f"Response: {data}")
-             return "" # Return empty string if structure is wrong
+            with print_lock:
+                print(f"Error [Row {row_identifier}]: Max retries reached for: '{user_content[:50]}...'")
+            return None # Indicate final failure after retries
+            
+    return None # Should not be reached, but ensures a return value
 
-    except requests.exceptions.RequestException as e:
-        print(f"Error calling Perplexity API: {e}")
-        # Consider adding retry logic here if needed
-        return None # Indicate API call failure
-    except Exception as e:
-        print(f"An unexpected error occurred during API call: {e}")
-        return None
-
+def translate_row_worker(row_data):
+    """Worker function to translate a single row."""
+    global translated_counter, error_counter # Use global counters
+    row, row_index, system_prompt = row_data # Unpack data
+    source_text = row.get(SOURCE_COLUMN, "").strip()
+    
+    # Add a small stagger before starting work for a thread
+    # time.sleep(random.uniform(0, THREAD_STAGGER_DELAY)) # Stagger start
+    
+    translated_text = None
+    if source_text:
+        # Pass row_index + 2 because CSV is 1-indexed and has a header
+        translated_text = call_perplexity_api(system_prompt, source_text, row_identifier=row_index + 2)
+        
+        with print_lock: # Lock access to shared counters
+            if translated_text is not None:
+                translated_counter += 1
+            else:
+                error_counter += 1
+                translated_text = "" # Ensure target column is empty on error
+    else:
+        # Keep target empty if source is empty, don't count as error or success
+        translated_text = ""
+        
+    row[TARGET_COLUMN] = translated_text
+    return row # Return the modified row
 
 def translate_csv(input_file, output_file, system_prompt):
-    """Reads the input CSV, translates specified column, and writes to output CSV."""
+    """Reads the input CSV, translates specified column using threads, and writes to output CSV."""
+    global translated_counter, error_counter # Reset counters
+    translated_counter = 0
+    error_counter = 0
+    processed_rows = []
+    
     try:
-        with open(input_file, 'r', encoding='utf-8') as infile, \
-             open(output_file, 'w', encoding='utf-8', newline='') as outfile:
-            
+        # Read all rows into memory first for threading
+        with open(input_file, 'r', encoding='utf-8') as infile:
             reader = csv.DictReader(infile)
             if SOURCE_COLUMN not in reader.fieldnames or TARGET_COLUMN not in reader.fieldnames:
                 print(f"Error: CSV must contain '{SOURCE_COLUMN}' and '{TARGET_COLUMN}' columns.")
                 exit(1)
+            fieldnames = reader.fieldnames
+            # Store rows with their original index for processing and later sorting if needed
+            rows_to_process = [(row, index, system_prompt) for index, row in enumerate(reader)]
+        
+        total_rows = len(rows_to_process)
+        print(f"Starting translation process for {total_rows} rows using up to {MAX_WORKER_THREADS} threads...")
 
-            writer = csv.DictWriter(outfile, fieldnames=reader.fieldnames)
+        # Use ThreadPoolExecutor for managing threads
+        with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKER_THREADS) as executor:
+            # Use tqdm for progress bar
+            # Wrap executor.map or use as_completed for progress tracking
+            futures = [executor.submit(translate_row_worker, row_data) for row_data in rows_to_process]
+            
+            # Process results as they complete, showing progress
+            for future in tqdm(concurrent.futures.as_completed(futures), total=total_rows, desc="Translating"): 
+                try:
+                    processed_rows.append(future.result()) # Append results as they finish
+                except Exception as e:
+                    # This catches errors *within* the worker function execution itself, 
+                    # though call_perplexity_api should handle most API issues.
+                    with print_lock:
+                        print(f"Error processing future result: {e}")
+                    # Decide how to handle this - perhaps append a placeholder row?
+                    # For now, we just lose the row if the future itself fails badly.
+                    error_counter += 1 # Count this as an error
+        
+        # --- IMPORTANT: Ensure results are sorted back to original order if necessary --- 
+        # Since we are appending results as they complete, they might be out of order.
+        # If the original order matters (it usually does for CSVs), sort based on index.
+        # We didn't explicitly store the original index *in the result* row dict. Let's assume
+        # the input `rows_to_process` order corresponds to final desired order for simplicity now.
+        # If order was critical and `as_completed` used, we'd need to return (index, row) from worker.
+        # For now, assuming the order `processed_rows` has is acceptable or matches input. 
+
+        print("\nWriting results to output file...")
+        # Write the processed rows to the output file
+        with open(output_file, 'w', encoding='utf-8', newline='') as outfile:
+            writer = csv.DictWriter(outfile, fieldnames=fieldnames)
             writer.writeheader()
+            writer.writerows(processed_rows) # Write all processed rows
 
-            print(f"Starting translation process for {input_file}...")
-            row_count = 0
-            translated_count = 0
-            
-            # --- Remove START TEMP DEBUGGING ---
-            # # Process only the first data row (after header)
-            # first_row = next(reader, None) 
-            # if not first_row:
-            #     print("Error: CSV is empty or has only a header.")
-            #     exit(1)
-            # --- Remove END TEMP DEBUGGING ---
-
-            # --- Remove START TEMP DEBUGGING ---
-            # row_count = 1 # Since we are only processing one row
-            # --- Remove END TEMP DEBUGGING ---
-            
-            for row in reader: # Restore loop for all rows
-                row_count += 1 # Restore row counting
-
-            # --- Remove START TEMP DEBUGGING ---
-            # # Use the first row data
-            # row = first_row 
-            # --- Remove END TEMP DEBUGGING ---
-
-                source_text = row.get(SOURCE_COLUMN, "").strip()
-                
-                if source_text:
-                    print(f"Translating row {row_count}: '{source_text[:50]}...'")
-                    # --- Remove START TEMP DEBUGGING ---
-                    # # Directly call and print the result, don't write to file yet
-                    translation = call_perplexity_api(system_prompt, source_text)
-                    # print(f"--- Translation Result ---")
-                    # --- Remove END TEMP DEBUGGING ---
-                    
-                    if translation is not None: # Check includes empty string now
-                        # --- Remove START TEMP DEBUGGING ---
-                        # print(translation)
-                        # --- Remove END TEMP DEBUGGING ---
-                        row[TARGET_COLUMN] = translation # Assign parsed translation
-                        translated_count += 1
-                    else:
-                        # --- Remove START TEMP DEBUGGING ---
-                        # print("API call failed.")
-                        # --- Remove END TEMP DEBUGGING ---
-                        # Handle API call failure (returned None)
-                        print(f"Skipping translation for row {row_count} due to API error.")
-                        row[TARGET_COLUMN] = "" # Keep target empty on error
-                    # --- Remove START TEMP DEBUGGING ---
-                    # print(f"--- End Translation Result ---")
-                    # --- Remove END TEMP DEBUGGING ---
-
-                    # Add delay between requests
-                    time.sleep(REQUEST_DELAY_SECONDS) # Restore delay
-                else:
-                    print(f"Skipping row {row_count}: Source text is empty.")
-                    row[TARGET_COLUMN] = ""
-
-                # --- Remove START TEMP DEBUGGING ---
-                # Skip writing to file for this test
-                writer.writerow(row) # Restore writing row
-                # --- Remove END TEMP DEBUGGING ---
-
-            # --- Remove START TEMP DEBUGGING ---
-            # print(f"\nTranslation process completed for single row test.")
-            # --- Remove END TEMP DEBUGGING ---
-            print(f"\nTranslation process completed.") # Restore original message
-            print(f"Total rows processed: {row_count}")
-            print(f"Rows translated: {translated_count}")
-            # --- Remove START TEMP DEBUGGING ---
-            # # print(f"Output saved to: {output_file}") # No output saved in this test
-            # --- Remove END TEMP DEBUGGING ---
-            print(f"Output saved to: {output_file}") # Restore original message
+        print(f"\nTranslation process completed.")
+        print(f"Total rows processed: {total_rows}")
+        print(f"Rows successfully translated: {translated_counter}")
+        print(f"Rows failed after retries: {error_counter}")
+        print(f"Output saved to: {output_file}")
 
     except FileNotFoundError:
         print(f"Error: Input CSV file not found at {input_file}")
@@ -192,6 +230,14 @@ def translate_csv(input_file, output_file, system_prompt):
         exit(1)
 
 if __name__ == "__main__":
+    # Basic check for API Key presence before starting
+    if not API_KEY:
+        print("Critical Error: PERPLEXITY_API_KEY not found in .env file. Exiting.")
+        exit(1)
+    if not MODEL:
+        print("Critical Error: PERPLEXITY_MODEL not found in .env file. Exiting.")
+        exit(1)
+        
     print("Loading system prompt...")
     system_prompt_content = load_system_prompt(SYSTEM_PROMPT_FILE)
     

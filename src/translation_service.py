@@ -474,7 +474,13 @@ def translate_row_worker(task_data):
     global translated_counter, error_counter 
     row, row_index = task_data 
     source_text = row.get(SOURCE_COLUMN, "").strip()
-    final_translation = "" 
+    final_translation = ""
+    initial_translation = None
+    evaluation_score = None
+    evaluation_feedback = None
+    error_message = None
+    final_status = 'error' # Default to error
+
     audit_record_base = {
         "row_index": row_index + 1, 
         "source": source_text,
@@ -489,8 +495,8 @@ def translate_row_worker(task_data):
         return row 
 
     try:
-        final_status = 'error' # Initialize final_status HERE, inside the try block
-        
+        # final_status initialized here is good
+
         # Define the final instruction to append to constructed prompts
         final_instruction = "\n\n**IMPORTANT FINAL INSTRUCTION: Your final output should contain ONLY the final text (translation/evaluation/revision). No extra text, formatting, or explanations.**"
 
@@ -569,7 +575,7 @@ def translate_row_worker(task_data):
         final_status = 'error'
 
     # Final DB Update for the task
-    # Ensure final_translation is assigned even on errors before this point
+    # Now all variables (initial_tx, score, feedback, final_tx, error_msg) will have a value (potentially None)
     db_manager.update_task_results(config.DATABASE_FILE, row_index + 2, final_status, initial_translation, evaluation_score, evaluation_feedback, final_translation, error_message)
     
     # ALWAYS return the row dictionary, updated with the final translation/status

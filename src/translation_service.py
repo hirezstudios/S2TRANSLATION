@@ -494,6 +494,8 @@ def translate_row_worker(task_data, worker_config):
     evaluation_feedback_local = None
     error_message_local = None
     final_status = 'error' 
+    approved_translation_local = None 
+    review_status_local = 'pending_review' # Default review status if things go wrong early
     
     audit_record_base = {"task_id": task_id, "row_index": task_data['row_index_in_file'] + 1, "language": lang_code, "mode": worker_config['translation_mode']}
 
@@ -501,9 +503,10 @@ def translate_row_worker(task_data, worker_config):
         logger.warning(f"Task {task_id} (Row {row_identifier}): Source text empty.")
         final_status = 'completed'
         error_message_local = "Empty source text"
-        audit_record = {**audit_record_base, "error": error_message_local, "final_translation": ""}
-        # Update DB directly
-        db_manager.update_task_results(db_path, task_id, final_status, final_tx="", error_msg=error_message_local)
+        approved_translation_local = "" # Empty approved for empty source
+        review_status_local = 'approved_original' # Auto-approve empty source?
+        audit_record = {**audit_record_base, "error": error_message_local, "final_translation": "", "approved_translation": approved_translation_local, "review_status": review_status_local}
+        db_manager.update_task_results(db_path, task_id, final_status, final_tx="", approved_tx=approved_translation_local, review_sts=review_status_local, error_msg=error_message_local)
         log_audit_record(audit_record)
         return True # Indicate success (completed handling empty source)
         
@@ -532,13 +535,19 @@ def translate_row_worker(task_data, worker_config):
             final_translation_local = call_active_api(api_to_use, stage1_prompt, source_text, 
                                                 row_identifier=row_identifier, model_override=model_to_use,
                                                 openai_client_obj=openai_client_obj)
-            if final_translation_local is not None:
+            if final_translation_local is not None and not final_translation_local.startswith("ERROR:BLOCKED:"):
                 final_status = 'completed'
+                approved_translation_local = final_translation_local
+                review_status_local = 'approved_original'
                 audit_record["final_translation"] = final_translation_local
+                audit_record["approved_translation"] = approved_translation_local
+                audit_record["review_status"] = review_status_local
             else:
-                error_message_local = "Stage 1 API call failed" 
+                error_message_local = final_translation_local or "Stage 1 API call failed" 
                 audit_record["error"] = error_message_local
                 final_status = 'error'
+                approved_translation_local = None # No approval on error
+                review_status_local = 'pending_review' # Or maybe 'error'? Stick to pending.
             log_audit_record(audit_record)
 
         elif translation_mode == "THREE_STAGE":
@@ -647,7 +656,13 @@ def translate_row_worker(task_data, worker_config):
 
     # Final DB Update 
     # Update with all collected local results for this task
-    db_manager.update_task_results(db_path, task_id, final_status, initial_translation_local, evaluation_score_local, evaluation_feedback_local, final_translation_local, error_message_local)
+    db_manager.update_task_results(
+        db_path, task_id, final_status, 
+        initial_translation_local, evaluation_score_local, evaluation_feedback_local, 
+        final_translation_local, approved_translation_local, # Pass approved_translation
+        review_status_local, # Pass review_status
+        error_message_local
+    )
     
     # Return simple status for thread pool progress tracking
     return final_status == 'completed' 

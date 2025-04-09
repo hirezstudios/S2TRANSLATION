@@ -188,32 +188,54 @@ def update_task_status(db_file_path, task_id, new_status, error_msg=None):
     finally:
         conn.close()
 
-def update_task_results(db_file_path, task_id, status, initial_tx=None, score=None, feedback=None, final_tx=None, error_msg=None):
-    """Updates task results and status. Sets initial review_status if task completed successfully."""
+def update_task_results(db_file_path, task_id, status, 
+                          initial_tx=None, score=None, feedback=None, 
+                          final_tx=None, approved_tx=None, review_sts=None,
+                          error_msg=None):
+    """Updates task results, status, and optionally review status/approved text."""
     conn = get_db_connection(db_file_path)
     try:
-        # Determine initial review status based on final task execution status
-        review_status_update = "" # Don't update review status by default
-        if status == 'completed':
-            # Only set to pending_review if it's not already reviewed
-            # This prevents overwriting an existing review if task is re-run?
-            # Simpler: just set it on completion.
-            review_status_update = ", review_status = 'pending_review'"
+        # Build SET clauses dynamically to avoid overwriting unrelated fields with None
+        set_clauses = [
+            "status = ?",
+            "last_updated = CURRENT_TIMESTAMP"
+        ]
+        params = [status]
 
-        sql = f"""
-            UPDATE TranslationTasks 
-            SET status = ?, 
-                initial_translation = ?, 
-                evaluation_score = ?, 
-                evaluation_feedback = ?, 
-                final_translation = ?, 
-                error_message = ?, 
-                last_updated = CURRENT_TIMESTAMP
-                {review_status_update} 
-            WHERE task_id = ?
-            """
-        params = (status, initial_tx, score, feedback, final_tx, error_msg, task_id)
-        conn.execute(sql, params)
+        if initial_tx is not None: 
+            set_clauses.append("initial_translation = ?")
+            params.append(initial_tx)
+        if score is not None:
+            set_clauses.append("evaluation_score = ?")
+            params.append(score)
+        if feedback is not None:
+            set_clauses.append("evaluation_feedback = ?")
+            params.append(feedback)
+        if final_tx is not None:
+            set_clauses.append("final_translation = ?")
+            params.append(final_tx)
+        if approved_tx is not None: # Update approved text if provided
+            set_clauses.append("approved_translation = ?")
+            params.append(approved_tx)
+        if review_sts is not None: # Update review status if provided
+            set_clauses.append("review_status = ?")
+            params.append(review_sts)
+            # Also update timestamp/user if review status is changing?
+            # Could be done here or in update_review_status
+            if review_sts != 'pending_review': # Example: Set timestamp if not pending
+                 set_clauses.append("review_timestamp = CURRENT_TIMESTAMP")
+                 # Add reviewed_by = ? if user tracking is added later
+                 # params.append(user_id)
+
+        # Always update error message (could be None to clear it)
+        set_clauses.append("error_message = ?")
+        params.append(error_msg) 
+            
+        params.append(task_id) # For the WHERE clause
+        
+        sql = f"UPDATE TranslationTasks SET { ', '.join(set_clauses) } WHERE task_id = ?"
+        
+        conn.execute(sql, tuple(params))
         conn.commit()
     except sqlite3.Error as e:
         logger.error(f"Failed to update results for task {task_id}: {e}")

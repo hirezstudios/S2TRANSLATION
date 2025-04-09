@@ -489,6 +489,8 @@ def translate_row_worker(task_data):
         return row 
 
     try:
+        final_status = 'error' # Initialize final_status HERE, inside the try block
+        
         # Define the final instruction to append to constructed prompts
         final_instruction = "\n\n**IMPORTANT FINAL INSTRUCTION: Your final output should contain ONLY the final text (translation/evaluation/revision). No extra text, formatting, or explanations.**"
 

@@ -52,12 +52,21 @@ TARGET_COLUMN = f"tg_{LANGUAGE_CODE}"
 
 # --- Threading and Retry Configuration ---
 # Use environment variables with defaults
-MAX_WORKER_THREADS = int(os.getenv("MAX_WORKER_THREADS", 8))
-API_MAX_RETRIES = int(os.getenv("API_MAX_RETRIES", 3))
-# Convert delays to float
-API_INITIAL_RETRY_DELAY = float(os.getenv("API_INITIAL_RETRY_DELAY", 5.0))
-API_MAX_RETRY_DELAY = float(os.getenv("API_MAX_RETRY_DELAY", 60.0))
-THREAD_STAGGER_DELAY = float(os.getenv("THREAD_STAGGER_DELAY", 1.0)) 
+MAX_WORKER_THREADS_STR = os.getenv("MAX_WORKER_THREADS", "8")
+MAX_WORKER_THREADS = int(MAX_WORKER_THREADS_STR.split('#')[0].strip())
+
+API_MAX_RETRIES_STR = os.getenv("API_MAX_RETRIES", "3")
+API_MAX_RETRIES = int(API_MAX_RETRIES_STR.split('#')[0].strip())
+
+# Convert delays to float, also applying strip and split
+API_INITIAL_RETRY_DELAY_STR = os.getenv("API_INITIAL_RETRY_DELAY", "5.0")
+API_INITIAL_RETRY_DELAY = float(API_INITIAL_RETRY_DELAY_STR.split('#')[0].strip())
+
+API_MAX_RETRY_DELAY_STR = os.getenv("API_MAX_RETRY_DELAY", "60.0")
+API_MAX_RETRY_DELAY = float(API_MAX_RETRY_DELAY_STR.split('#')[0].strip())
+
+THREAD_STAGGER_DELAY_STR = os.getenv("THREAD_STAGGER_DELAY", "1.0") 
+THREAD_STAGGER_DELAY = float(THREAD_STAGGER_DELAY_STR.split('#')[0].strip())
 # --- End Configuration ---
 
 # Thread-safe lock for printing and counters if needed (especially with tqdm)
@@ -244,19 +253,30 @@ def call_openai_api(system_prompt, user_content, row_identifier="N/A"):
 
 def call_gemini_api(system_prompt, user_content, row_identifier="N/A"):
     """Calls the Gemini API for translation with retry logic and parses the output."""
-    # Check if client is configured (should be done in main)
+    # Check for API key first
+    if not GEMINI_API_KEY:
+        with print_lock:
+             print(f"Error [Row {row_identifier}]: GEMINI_API_KEY not found in .env file.")
+        return None
     if not GEMINI_MODEL:
          with print_lock:
              print(f"Error [Row {row_identifier}]: GEMINI_MODEL not found in .env file.")
          return None
+    
+    # --- Configure Gemini API within the thread --- 
+    try:
+        genai.configure(api_key=GEMINI_API_KEY)
+    except Exception as e:
+        with print_lock:
+            print(f"Error [Gemini Row {row_identifier}]: Failed to configure Gemini client - {e}")
+        return None
+    # --- End Configuration --- 
          
     # Configure generation settings
     generation_config = genai.GenerationConfig(
         temperature=0.2,
-        # max_output_tokens=1024, # Adjust as needed
         response_mime_type="text/plain",
     )
-    # Configure safety settings (adjust thresholds as needed)
     safety_settings = {
         HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE,
         HarmCategory.HARM_CATEGORY_HATE_SPEECH: HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE,
@@ -264,7 +284,7 @@ def call_gemini_api(system_prompt, user_content, row_identifier="N/A"):
         HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE,
     }
 
-    # Create the model instance within the function for thread safety
+    # Create the model instance 
     try:
         model = genai.GenerativeModel(
             model_name=GEMINI_MODEL,
@@ -280,52 +300,42 @@ def call_gemini_api(system_prompt, user_content, row_identifier="N/A"):
     current_retry_delay = API_INITIAL_RETRY_DELAY
     for attempt in range(API_MAX_RETRIES + 1):
         try:
-            # Use generate_content (non-streaming)
             response = model.generate_content(user_content)
 
-            # Extract text - check response structure carefully
-            # Assuming response.text holds the direct translation based on mime_type
             if hasattr(response, 'text'):
                  translation = response.text.strip()
                  if translation:
-                     # Gemini might still include instructions or noise, add parsing if needed
                      return translation
                  else:
                      with print_lock:
                          print(f"Warning [Gemini Row {row_identifier}]: Translation result empty.")
-                     # Check for blocked content due to safety settings
                      if response.prompt_feedback.block_reason:
                          print(f"--> Blocked Reason: {response.prompt_feedback.block_reason}")
                      return ""
             else:
-                 # Handle cases where text is not directly available or response structure is different
-                 # Check response.parts or other attributes
                  with print_lock:
                      print(f"Warning [Gemini Row {row_identifier}]: Unexpected Gemini response structure (no .text attribute).")
-                     # print(response) # Optional: log full response
                  return "" 
         
-        # --- Gemini Specific Retry Logic --- 
-        except google_exceptions.ResourceExhausted as e: # Likely rate limit
+        except google_exceptions.ResourceExhausted as e: 
             with print_lock:
                 print(f"Attempt {attempt + 1}/{API_MAX_RETRIES + 1} [Gemini Row {row_identifier}]: Rate limit likely exceeded - {e}")
-        except google_exceptions.DeadlineExceeded as e: # Timeout
+        except google_exceptions.DeadlineExceeded as e: 
              with print_lock:
                 print(f"Attempt {attempt + 1}/{API_MAX_RETRIES + 1} [Gemini Row {row_identifier}]: API call timed out - {e}")
-        except google_exceptions.InternalServerError as e: # 5xx errors
+        except google_exceptions.InternalServerError as e: 
              with print_lock:
                 print(f"Attempt {attempt + 1}/{API_MAX_RETRIES + 1} [Gemini Row {row_identifier}]: Internal Server Error - {e}")
         except google_exceptions.ServiceUnavailable as e:
              with print_lock:
                 print(f"Attempt {attempt + 1}/{API_MAX_RETRIES + 1} [Gemini Row {row_identifier}]: Service Unavailable - {e}")
-        except google_exceptions.GoogleAPICallError as e: # General Google API errors
+        except google_exceptions.GoogleAPICallError as e: 
             with print_lock:
                 print(f"Attempt {attempt + 1}/{API_MAX_RETRIES + 1} [Gemini Row {row_identifier}]: Google API Call Error - {e}")
-        except Exception as e: # Catch any other unexpected errors
+        except Exception as e: 
              with print_lock:
                 print(f"Attempt {attempt + 1}/{API_MAX_RETRIES + 1} [Gemini Row {row_identifier}]: Unexpected Error - {e}")
         
-        # Prepare for retry if applicable
         if attempt < API_MAX_RETRIES:
             wait_time = min(current_retry_delay + random.uniform(0, 1), API_MAX_RETRY_DELAY)
             with print_lock:
@@ -335,7 +345,7 @@ def call_gemini_api(system_prompt, user_content, row_identifier="N/A"):
         else:
             with print_lock:
                 print(f"Error [Gemini Row {row_identifier}]: Max retries reached for: '{user_content[:50]}...'")
-            return None # Indicate final failure
+            return None 
 
     return None
 

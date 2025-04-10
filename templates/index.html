@@ -300,18 +300,28 @@
     function updateStatusUI(data) {
         let statusText = `Batch ${data.batch_id}: ${data.batch_status}`; 
         let progressPercent = 0;
+        const isComplete = (data.batch_status === 'completed' || data.batch_status === 'completed_with_errors' || data.batch_status === 'failed' || data.batch_status === 'completed_empty');
+
         if(data.total_tasks > 0) {
             progressPercent = Math.round(((data.completed_tasks + data.error_tasks) / data.total_tasks) * 100);
             statusText += ` (${data.completed_tasks + data.error_tasks}/${data.total_tasks} tasks processed)`;
         }
-        progressBar.style.width = `${progressPercent}%`;
-        progressBar.textContent = `${progressPercent}%`;
-        progressBar.setAttribute('aria-valuenow', progressPercent);
+        
+        // Show progress bar only if not complete and there are tasks
+        if (!isComplete && data.total_tasks > 0) { 
+            progressBar.style.width = `${progressPercent}%`;
+            progressBar.textContent = `${progressPercent}%`;
+            progressBar.setAttribute('aria-valuenow', progressPercent);
+            progressArea.style.display = 'block'; // Ensure visible
+        } else {
+            progressArea.style.display = 'none'; // Hide when complete or no tasks
+        }
         
         let alertClass = 'info';
         if (data.batch_status === 'completed') alertClass = 'success';
-        else if (data.batch_status === 'failed' || data.error_tasks > 0) alertClass = 'danger';
+        else if (data.batch_status === 'failed' || data.error_tasks > 0) alertClass = 'danger'; // Keep danger for failed or if errors exist
         else if (data.batch_status === 'completed_with_errors') alertClass = 'warning';
+        else if (data.batch_status === 'completed_empty') alertClass = 'secondary'; // Added style for empty completion
         
         setStatus(statusText, alertClass);
 
@@ -321,10 +331,11 @@
         const existingLink = actionArea.querySelector('.results-link');
         if (existingLink) existingLink.remove(); 
         
-        const isComplete = (data.batch_status === 'completed' || data.batch_status === 'completed_with_errors');
         const hasTasks = data.total_tasks > 0;
+        // Update condition to show link for completed or completed_with_errors, only if there were tasks
+        const canViewResults = (data.batch_status === 'completed' || data.batch_status === 'completed_with_errors') && hasTasks;
 
-        if (isComplete && hasTasks) {
+        if (canViewResults) {
              // Add View/Edit Results link
              const resultsLink = document.createElement('a');
              resultsLink.href = `/results/${data.batch_id}`;

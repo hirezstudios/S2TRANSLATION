@@ -66,24 +66,27 @@
 
         // Initialize Tabulator
         const table = new Tabulator("#results-table", {
-            data: taskData,           
-            index: "task_id", // Use task_id from data as the unique row index
-            layout: "fitColumns",   // Changed from fitDataTable
-            pagination: "local",      
+            data: taskData, 
+            index: "task_id",
+            layout: "fitColumns",
+            pagination: "local",
             paginationSize: 50,       
-            paginationSizeSelector: [10, 50, 100, 500, true], 
+            paginationSizeSelector: [10, 25, 50, 100, 500, true],
+            movableColumns: true,
+            responsiveLayout: "hide",
+            headerFilterLiveFilterDelay: 600,
             columns: [
-                { title: "#", field: "row_index_in_file", formatter: "rownum", hozAlign: "center", width: 60, frozen:true, resizable:false, visible: true }, // Unhidden
-                { title: "ID", field: "task_id", width: 60, visible: false }, // Hidden
-                { title: "Record ID", field: "record_id", width: 150, tooltip: true, headerFilter: "input", frozen:true },
-                { title: "Lang", field: "language_code", width: 70, headerFilter: "input", frozen:true, resizable:false }, // Width 70
+                { title: "#", field: "row_index_in_file", formatter: "rownum", hozAlign: "center", width: 40, frozen:true, resizable:false, visible: true }, // Unhidden
+                { title: "ID", field: "task_id", width: 40, visible: false }, // Hidden
+                { title: "Record ID", field: "record_id", width: 140, tooltip: true, headerFilter: "input", frozen:true },
+                { title: "Lang", field: "language_code", width: 60, headerFilter: "input", frozen:true, resizable:false }, // Width 70
                 { 
                     title: "Source Text", 
                     field: "source_text", 
                     headerFilter: "input", 
                     headerFilterPlaceholder:"Filter Source...", 
                     tooltip: true, 
-                    width: "20%",
+                    widthGrow: 3,
                     formatter: "textarea",
                     resizable: true
                 },
@@ -93,7 +96,7 @@
                     headerFilter: "input", 
                     headerFilterPlaceholder:"Filter LLM Output...", 
                     tooltip: true, 
-                    width: "20%",
+                    widthGrow: 3,
                     formatter: "textarea",
                     resizable: true
                 },
@@ -103,13 +106,14 @@
                     headerFilter: "input",
                     headerFilterPlaceholder:"Filter Approved...",
                     tooltip: true,
-                    width: "20%",
+                    widthGrow: 3,
                     editor: "textarea", 
                     formatter: "textarea", 
                     resizable: true,
                     editorParams: {
                          verticalNavigation: "hybrid",
-                         elementAttributes:{ maxLength:"5000" }
+                         elementAttributes:{ maxLength:"5000" },
+                         selectContents: true,
                     },
                     cellEdited: function(cell){
                         const taskId = cell.getRow().getData().task_id;
@@ -121,7 +125,7 @@
                 {
                     title: "Review Status", 
                     field: "review_status", 
-                    width: 160, hozAlign: "center", 
+                    width: 140, hozAlign: "center", 
                     formatter: statusFormatter, 
                     headerFilter: "select", 
                     headerFilterParams:{values:["", "pending_review", "approved_original", "approved_edited", "denied"], sortValuesList: "asc"},

@@ -1,11 +1,14 @@
 import os
 import logging
-from flask import Flask, request, render_template, jsonify, send_file
+from flask import Flask, request, render_template, jsonify, send_file, flash, redirect, url_for
 import uuid
 import json
 import threading
 from werkzeug.utils import secure_filename
 import pandas as pd # Make sure pandas is imported
+import glob # Added for rule file scanning
+from datetime import datetime # Added for archiving
+import re # Added for parsing tg_ filenames
 
 # Import backend modules
 from src import config
@@ -24,15 +27,77 @@ logging.getLogger('src.db_manager').setLevel(logging.DEBUG)
 logger.info("Log levels for src.translation_service and src.db_manager set to DEBUG.")
 # --- End Explicit level setting --- #
 
+# --- Constants for Rules Feature ---
+PROMPT_DIR = os.path.join(os.path.dirname(__file__), 'system_prompts')
+ARCHIVE_DIR = os.path.join(PROMPT_DIR, 'archive')
+
+# --- Helper function to get rule files ---
+def get_rule_files():
+    """Scans the system_prompts directory for rule files."""
+    rule_files = {}
+    
+    # Define patterns for specific important files and language files
+    patterns = {
+        'global.md': 'Global Rules',
+        'stage2_evaluate_template.md': 'Stage 2 Evaluate Template',
+        'stage3_refine_template.md': 'Stage 3 Refine Template',
+        'tg_*.md': 'Language Specific Rules' # Placeholder description
+    }
+
+    # Ensure PROMPT_DIR exists
+    if not os.path.isdir(PROMPT_DIR):
+        logger.error(f"Prompt directory not found: {PROMPT_DIR}")
+        return {} # Return empty if directory doesn't exist
+
+    # Find files matching patterns
+    for filename_pattern, description in patterns.items():
+        full_pattern = os.path.join(PROMPT_DIR, filename_pattern)
+        found_files = glob.glob(full_pattern)
+        
+        for file_path in found_files:
+            # Make sure we don't list files from the archive directory itself
+            if os.path.dirname(file_path) == PROMPT_DIR:
+                base_filename = os.path.basename(file_path)
+                
+                current_description = description # Default description
+                # Try to get a more specific description for language files
+                if filename_pattern == 'tg_*.md':
+                    lang_code_match = re.match(r"tg_([a-zA-Z]{2}[A-Z]{2})\.md", base_filename)
+                    if lang_code_match:
+                        lang_code = lang_code_match.group(1)
+                        # Use language map from config if available
+                        current_description = f"{config.LANGUAGE_NAME_MAP.get(lang_code, lang_code)} Rules"
+                
+                rule_files[base_filename] = current_description
+            else:
+                 # This case handles specific files like 'global.md'
+                 # If a file like global.md was expected but not found, log it
+                 if '*' not in filename_pattern and not os.path.isfile(file_path):
+                     logger.warning(f"Expected rule file not found: {file_path}")
+
+    # Sort rules for consistent display: global, stages, then languages alphabetically
+    sorted_rule_files = {}
+    # Add specific files in desired order
+    for fname in ['global.md', 'stage2_evaluate_template.md', 'stage3_refine_template.md']:
+        if fname in rule_files:
+            sorted_rule_files[fname] = rule_files.pop(fname)
+            
+    # Add remaining language files sorted alphabetically
+    for fname in sorted(rule_files.keys()):
+         sorted_rule_files[fname] = rule_files[fname]
+
+    return sorted_rule_files
+
+
 # --- Flask App Setup ---
 def create_app():
     app = Flask(__name__)
-    app.config["SECRET_KEY"] = os.urandom(24) # Needed for session/flash potentially
+    app.config["SECRET_KEY"] = os.urandom(24) # Needed for session/flash
     
     # Ensure necessary directories exist
     os.makedirs(config.OUTPUT_DIR, exist_ok=True)
-    os.makedirs(config.INPUT_CSV_DIR, exist_ok=True) # For temp uploads if needed
-    os.makedirs(config.ARCHIVE_DIR, exist_ok=True)
+    # os.makedirs(config.INPUT_CSV_DIR, exist_ok=True) # Removed, using temp_uploads instead
+    os.makedirs(ARCHIVE_DIR, exist_ok=True) # Use constant
     db_manager.initialize_database(config.DATABASE_FILE)
     prompt_manager.load_prompts()
 
@@ -509,12 +574,126 @@ def create_app():
         except Exception as e:
             logger.exception(f"Error fetching batch history: {e}")
             # Render history page with an error message? Or redirect?
-            return render_template('history.html', batches=[], error="Failed to load batch history.")
+            # Using flash for error message display
+            flash(f'Error loading batch history: {e}', 'danger') 
+            return render_template('history.html', batches=[]) # Pass empty list
 
-    # Placeholder for other routes: /rules
-    @app.route('/placeholder')
+    # --- Rules Routes --- 
+    @app.route('/rules')
+    def list_rules():
+        """Displays a list of available rule files."""
+        logger.info("Received request for /rules")
+        try:
+            rules = get_rule_files()
+            return render_template('rules_list.html', rules=rules)
+        except Exception as e:
+            logger.exception("Error getting rule files list.")
+            flash(f'Error loading rules list: {e}', 'danger')
+            return render_template('rules_list.html', rules={}) # Pass empty dict on error
+            
+    @app.route('/rules/view/<path:filename>')
+    def view_rule(filename):
+        """Displays the content of a specific rule file."""
+        logger.info(f"Received request to view rule: {filename}")
+        # Security: Prevent accessing files outside the PROMPT_DIR
+        target_file_path = os.path.abspath(os.path.join(PROMPT_DIR, filename))
+        if not target_file_path.startswith(os.path.abspath(PROMPT_DIR)):
+            logger.warning(f"Attempt to access file outside prompt directory: {filename}")
+            flash("Invalid file path.", "danger")
+            return redirect(url_for('list_rules'))
+
+        try:
+            with open(target_file_path, 'r', encoding='utf-8') as f:
+                content = f.read()
+            # Get the friendly description for the title
+            all_rules = get_rule_files() # Reuse helper to get descriptions
+            description = all_rules.get(filename, filename) # Default to filename if not found
+            return render_template('rules_view.html', filename=filename, description=description, content=content)
+        except FileNotFoundError:
+            logger.error(f"Rule file not found: {target_file_path}")
+            flash(f"Rule file '{filename}' not found.", "warning")
+            return redirect(url_for('list_rules'))
+        except Exception as e:
+            logger.exception(f"Error reading rule file {filename}: {e}")
+            flash(f"Error reading rule file '{filename}': {e}", "danger")
+            return redirect(url_for('list_rules'))
+
+    @app.route('/rules/edit/<path:filename>', methods=['GET', 'POST'])
+    def edit_rule(filename):
+        """Handles viewing the edit form and saving changes to a rule file."""
+        logger.info(f"Received request to edit rule: {filename} (Method: {request.method})")
+        
+        # --- Security Check & Path Setup --- 
+        target_file_path = os.path.abspath(os.path.join(PROMPT_DIR, filename))
+        if not target_file_path.startswith(os.path.abspath(PROMPT_DIR)):
+            logger.warning(f"Attempt to access file outside prompt directory for editing: {filename}")
+            flash("Invalid file path.", "danger")
+            return redirect(url_for('list_rules'))
+            
+        # Ensure the prompt directory exists (should always, but belt-and-suspenders)
+        if not os.path.isdir(PROMPT_DIR):
+             logger.error(f"Prompt directory {PROMPT_DIR} not found during edit.")
+             flash("Configuration error: Prompt directory not found.", "danger")
+             return redirect(url_for('list_rules'))
+             
+        # --- Handle POST Request (Saving Changes) --- 
+        if request.method == 'POST':
+            try:
+                edited_content = request.form.get('edited_content')
+                if edited_content is None: # Check if the form field exists
+                    raise ValueError("Form data missing 'edited_content'.")
+
+                # 1. Archive the current version
+                archive_filename = f"{filename}_{datetime.now().strftime('%Y%m%d%H%M%S')}.md"
+                archive_file_path = os.path.join(ARCHIVE_DIR, archive_filename)
+                os.makedirs(ARCHIVE_DIR, exist_ok=True) # Ensure archive dir exists
+                
+                if os.path.exists(target_file_path):
+                    with open(target_file_path, 'r', encoding='utf-8') as current_file, \
+                         open(archive_file_path, 'w', encoding='utf-8') as archive_file:
+                        archive_file.write(current_file.read())
+                    logger.info(f"Archived current version of {filename} to {archive_filename}")
+                else:
+                    logger.warning(f"Original file {filename} not found for archiving during save.")
+
+                # 2. Save the new content
+                with open(target_file_path, 'w', encoding='utf-8') as f:
+                    f.write(edited_content)
+                logger.info(f"Successfully saved changes to {filename}")
+                flash(f"Rule file '{filename}' saved successfully.", "success")
+                return redirect(url_for('view_rule', filename=filename)) # Redirect back to view
+
+            except Exception as e:
+                logger.exception(f"Error saving rule file {filename}: {e}")
+                flash(f"Error saving rule file '{filename}': {e}", "danger")
+                # Stay on the edit page if save fails, passing back the attempted content
+                # Need to get description again for the template title
+                all_rules = get_rule_files()
+                description = all_rules.get(filename, filename)
+                # Pass the content the user tried to save back to the template
+                return render_template('rules_edit.html', filename=filename, description=description, content=edited_content), 500 
+
+        # --- Handle GET Request (Show Edit Form) --- 
+        else: # request.method == 'GET'
+            try:
+                with open(target_file_path, 'r', encoding='utf-8') as f:
+                    content = f.read()
+                all_rules = get_rule_files()
+                description = all_rules.get(filename, filename)
+                return render_template('rules_edit.html', filename=filename, description=description, content=content)
+            except FileNotFoundError:
+                logger.error(f"Rule file not found for editing: {target_file_path}")
+                flash(f"Rule file '{filename}' not found.", "warning")
+                return redirect(url_for('list_rules'))
+            except Exception as e:
+                logger.exception(f"Error reading rule file {filename} for editing: {e}")
+                flash(f"Error reading rule file '{filename}' for editing: {e}", "danger")
+                return redirect(url_for('list_rules'))
+    # --- End Rules Routes ---
+
+    @app.route('/placeholder') # Keep or remove this placeholder?
     def placeholder():
-        return "Route not implemented yet."
+        return "Route not implemented yet.", 501
         
     return app
 
@@ -524,4 +703,4 @@ if __name__ == '__main__':
     # Note: Flask's dev server is not suitable for production.
     # Use Waitress or Gunicorn/uWSGI + Nginx for deployment.
     # Debug mode enables auto-reloading.
-    app.run(debug=True, threaded=False) # Set threaded=False for easier SSE/Celery debug initially
+    app.run(debug=True, threaded=True) # Set threaded=True generally for dev

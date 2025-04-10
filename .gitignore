@@ -6,4 +6,5 @@ output/
 .cursor/
 __pycache__/
 *.pyc
-temp_uploads/ 
+temp_uploads/
+.specstory/ 

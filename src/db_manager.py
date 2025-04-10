@@ -152,14 +152,14 @@ def add_batch(db_file_path, batch_id, filename, config_json):
 def add_translation_task(db_file_path, batch_id, row_index, lang_code, source_text, metadata_json):
     conn = get_db_connection(db_file_path)
     try:
+        logger.debug(f"DB_MANAGER: Adding task for Batch {batch_id}, Row {row_index}, Lang {lang_code}. Received metadata_json: {metadata_json}")
+        # --- End Debug Log --- #
         conn.execute("""
             INSERT INTO TranslationTasks 
             (batch_id, row_index_in_file, language_code, source_text, metadata_json, status)
             VALUES (?, ?, ?, ?, ?, ?) 
-        """, (batch_id, row_index, lang_code, source_text, metadata_json, 'pending'))
+        """, (batch_id, row_index, lang_code, source_text, metadata_json, 'pending')) 
         conn.commit()
-        # Avoid logging every single task insertion to prevent spam
-        # logger.debug(f"Added task for batch {batch_id}, row {row_index}, lang {lang_code}") 
     except sqlite3.Error as e:
         logger.error(f"Failed to add task for batch {batch_id}, row {row_index}, lang {lang_code}: {e}")
     finally:
@@ -334,6 +334,24 @@ def get_batch_info(db_file_path, batch_id):
     finally:
         conn.close()
 
+def get_all_batches_for_history(db_file_path):
+    """Fetches all batches for the history page, ordered by most recent."""
+    conn = get_db_connection(db_file_path)
+    try:
+        cursor = conn.execute("""
+            SELECT batch_id, upload_filename, upload_timestamp, status 
+            FROM Batches 
+            ORDER BY upload_timestamp DESC
+            """)
+        batches = cursor.fetchall()
+        logger.info(f"Retrieved {len(batches)} batches for history.")
+        return batches
+    except sqlite3.Error as e:
+        logger.error(f"Failed to get all batches for history: {e}")
+        return []
+    finally:
+        conn.close()
+
 def update_review_status(db_file_path, task_id, review_status, approved_translation, user_id=None):
     """Updates the review status and approved translation for a task."""
     conn = get_db_connection(db_file_path)
@@ -381,7 +399,8 @@ def get_tasks_for_review(db_file_path, batch_id, language_code=None, review_stat
         query = """
             SELECT task_id, row_index_in_file, language_code, source_text, 
                    initial_translation, evaluation_score, evaluation_feedback, 
-                   final_translation, approved_translation, review_status, status, error_message
+                   final_translation, approved_translation, review_status, status, error_message,
+                   metadata_json
             FROM TranslationTasks 
             WHERE batch_id = ? 
         """

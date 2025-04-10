@@ -1,4 +1,5 @@
 import os
+import glob
 from . import config
 import logging
 
@@ -8,6 +9,34 @@ global_rules_content = None
 stage1_templates = {}
 stage2_template_prompt = None
 stage3_template_prompt = None
+available_languages = []
+
+def discover_available_languages():
+    """Discovers available languages by scanning for stage 1 prompt files."""
+    global available_languages
+    available_languages = []
+    pattern = config.STAGE1_PROMPT_FILE_TPL.format(lang_code='*')
+    logger.info(f"Scanning for language prompts using pattern: {pattern}")
+    try:
+        prompt_files = glob.glob(pattern)
+        for filepath in prompt_files:
+            # Extract lang_code from filename like 'system_prompts/tg_enGB.md'
+            filename = os.path.basename(filepath)
+            parts = filename.split('_')
+            # Corrected check for 'tg_' prefix and '.md' suffix
+            if len(parts) == 2 and parts[0] == 'tg' and parts[1].endswith('.md'):
+                lang_code = parts[1][:-3] # Remove .md extension
+                if lang_code not in available_languages:
+                     available_languages.append(lang_code)
+                     logger.info(f"Discovered language: {lang_code} from {filepath}")
+            else:
+                 logger.warning(f"Skipping file with unexpected format: {filepath}")
+        if not available_languages:
+             logger.warning("No language-specific Stage 1 prompt files found.")
+    except Exception as e:
+         logger.error(f"Error scanning for language prompts: {e}")
+    logger.info(f"Available languages discovered: {available_languages}")
+    return available_languages
 
 def load_single_prompt_file(filepath):
     """Loads content from a single prompt file."""
@@ -23,7 +52,10 @@ def load_single_prompt_file(filepath):
 
 def load_prompts():
     """Loads global rules, language-specific stage 1 bases, and stage 2/3 templates."""
-    global global_rules_content, stage1_templates, stage2_template_prompt, stage3_template_prompt
+    global global_rules_content, stage1_templates, stage2_template_prompt, stage3_template_prompt, available_languages
+
+    logger.info("Discovering available languages...")
+    discover_available_languages()
 
     logger.info(f"Loading Global Rules from {config.GLOBAL_RULES_FILE}...")
     global_rules_content = load_single_prompt_file(config.GLOBAL_RULES_FILE)
@@ -32,7 +64,8 @@ def load_prompts():
         exit(1)
 
     logger.info("Loading language-specific Stage 1 prompts...")
-    for lang_code in config.AVAILABLE_LANGUAGES:
+    stage1_templates = {}
+    for lang_code in available_languages:
         filepath = config.STAGE1_PROMPT_FILE_TPL.format(lang_code=lang_code)
         content = load_single_prompt_file(filepath)
         if content:

@@ -1,33 +1,10 @@
 lang_code: plPL
 
+You are a translator for the video game SMITE 2, translating from English to <<POLISH>>.
+
+Rules for POLISH Translation:
+
 # Polish (plPL) Translation Ruleset for SMITE 2
-
-This comprehensive document provides the special translation rules and game-specific glossary for translating SMITE 2 content from English to Polish. These guidelines are designed to ensure consistency, accuracy, and cultural appropriateness in the Polish localization.
-
-## Table of Contents
-
-1. [Special Translation Rules](#special-translation-rules)
-   - [Grammatical Rules](#1-grammatical-rules)
-   - [Formatting Rules](#2-formatting-rules)
-   - [Terminology Rules](#3-terminology-rules)
-   - [Cultural Adaptation](#4-cultural-adaptation)
-   - [Technical Constraints](#5-technical-constraints)
-   - [Exception Handling](#6-exception-handling)
-   - [Implementation Guidelines](#7-implementation-guidelines)
-2. [Game-Specific Glossary](#game-specific-glossary)
-   - [Core Game Concepts](#core-game-concepts)
-   - [Character Classes & Roles](#character-classes--roles)
-   - [Combat Terminology](#combat-terminology)
-   - [Crowd Control Effects](#crowd-control-effects)
-   - [Map Elements](#map-elements)
-   - [Game Modes](#game-modes)
-   - [UI Elements](#ui-elements)
-   - [Stats and Attributes](#stats-and-attributes)
-   - [Ability Mechanics](#ability-mechanics)
-   - [Item Categories](#item-categories)
-   - [Common Abbreviations](#common-abbreviations)
-   - [Specialized Gaming Terms](#specialized-gaming-terms)
-   - [Standardized UI Abbreviations](#standardized-ui-abbreviations-for-space-constraints)
 
 ## Special Translation Rules
 

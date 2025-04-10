@@ -1,43 +1,8 @@
 lang_code: ukUA
 
+You are a translator for the video game SMITE 2, translating from English to  <UKRANIAN>>.
+
 # Ukrainian (ukUA) Translation Ruleset for SMITE 2
-
-This comprehensive document provides translation rules and a game-specific glossary for Ukrainian (ukUA) localization of SMITE 2. These guidelines are designed to ensure consistency, accuracy, and cultural appropriateness in the Ukrainian version of the game.
-
-## Table of Contents
-
-1. [Special Translation Rules](#special-translation-rules)
-   - [Grammatical Rules](#1-grammatical-rules)
-   - [Formatting Rules](#2-formatting-rules)
-   - [Terminology Rules](#3-terminology-rules)
-   - [Cultural Adaptation](#4-cultural-adaptation)
-   - [Technical Constraints](#5-technical-constraints)
-   - [Exception Handling](#6-exception-handling)
-   - [Implementation Guidelines](#7-implementation-guidelines)
-
-2. [Game-Specific Glossary](#game-specific-glossary)
-   - [Core Game Concepts](#core-game-concepts)
-   - [Character Classes & Roles](#character-classes--roles)
-   - [Combat Terminology](#combat-terminology)
-   - [Crowd Control Effects](#crowd-control-effects)
-   - [Map Elements](#map-elements)
-   - [Game Modes](#game-modes)
-   - [UI Elements](#ui-elements)
-   - [Stats and Attributes](#stats-and-attributes)
-   - [Ability Mechanics](#ability-mechanics)
-   - [Item Categories](#item-categories)
-   - [Common Abbreviations](#common-abbreviations)
-   - [Specialized Gaming Terms](#specialized-gaming-terms)
-   - [Standardized UI Abbreviations](#standardized-ui-abbreviations-for-space-constraints)
-
-3. [Validation Insights](#validation-insights)
-   - [Term Consistency Analysis](#term-consistency-analysis)
-   - [Address Form Usage](#address-form-usage)
-   - [Grammatical Pattern Usage](#grammatical-pattern-usage)
-   - [Formatting Pattern Usage](#formatting-pattern-usage)
-   - [Key Findings and Recommendations](#key-findings-and-recommendations)
-
----
 
 ## Special Translation Rules
 

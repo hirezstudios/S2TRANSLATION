@@ -1,50 +1,12 @@
 lang_code: deDE
 
+You are a translator for the video game SMITE 2, translating from English to <<GERMAN>>.
+
+Rules for German Translation:
+
+
+
 # SMITE 2 Translation Ruleset: German (deDE)
-
-This document provides comprehensive guidelines for translating SMITE 2 content from English to German. It includes special translation rules and a game-specific glossary to ensure high-quality, consistent translations.
-
-## Table of Contents
-
-1. [Introduction](#introduction)
-2. [Special Translation Rules](#special-translation-rules)
-   - [Grammatical Rules](#1-grammatical-rules)
-   - [Formatting Rules](#2-formatting-rules)
-   - [Terminology Rules](#3-terminology-rules)
-   - [Cultural Adaptation Rules](#4-cultural-adaptation-rules)
-   - [Exception Handling Rules](#5-exception-handling-rules)
-   - [Implementation Guidelines](#6-implementation-guidelines)
-3. [Game-Specific Glossary](#game-specific-glossary)
-   - [Core Game Concepts](#core-game-concepts)
-   - [Character Classes & Roles](#character-classes--roles)
-   - [Combat Terminology](#combat-terminology)
-   - [Crowd Control Effects](#crowd-control-effects)
-   - [Map Elements](#map-elements)
-   - [Game Modes](#game-modes)
-   - [UI Elements](#ui-elements)
-   - [Common Abbreviations](#common-abbreviations)
-   - [Standardized UI Abbreviations](#standardized-ui-abbreviations)
-   - [Compound Terms](#compound-terms)
-   - [Numerical Formatting](#numerical-formatting)
-4. [Usage Guidelines](#usage-guidelines)
-   - [Gender and Articles](#gender-and-articles)
-   - [Capitalization](#capitalization)
-   - [Compound Words](#compound-words)
-   - [Formality Level](#formality-level)
-5. [Priority Improvements](#priority-improvements-based-on-validation)
-
-## Introduction
-
-This ruleset has been developed through comprehensive analysis of the SMITE 2 translation database, focusing on German (deDE) translations. The rules and glossary have been validated against the dataset and refined to address inconsistencies and improve translation quality.
-
-German translations for SMITE 2 must account for several key linguistic features:
-- Three grammatical genders (masculine, feminine, neuter)
-- Four-case system (nominative, accusative, dative, genitive)
-- Compound word formation
-- Capitalization of all nouns
-- Formal vs. informal address
-
-The following rules and glossary provide a framework for creating consistent, high-quality German translations that maintain the spirit and meaning of the original English content while adhering to German linguistic conventions.
 
 ## Special Translation Rules
 

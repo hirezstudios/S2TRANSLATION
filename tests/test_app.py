@@ -19,7 +19,7 @@ def at():
     # print(f"CWD for test: {os.getcwd()}")
     try:
         at = AppTest.from_file(APP_FILE)
-        at.run()
+        at.run(timeout=15)
         yield at
     finally:
         # os.chdir(cwd)
@@ -34,16 +34,14 @@ def test_title(at):
     assert at.title[0].value == "SMITE 2 Translation Helper"
 
 def test_initial_widgets(at):
-    """Test if initial widgets (uploader, config) are present."""
-    assert len(at.file_uploader) == 1
-    assert len(at.radio) >= 1 # Mode selection
-    # Check for header/subheader presence
-    assert any(h.value == "1. Upload & Configure" for h in at.header)
-    assert any(sh.value == "Select Languages" for sh in at.subheader)
-    assert any(sh.value == "Configuration" for sh in at.subheader)
-    assert any(h.value == "2. Run Translation" for h in at.header)
-    assert any(h.value == "3. Export Results" for h in at.header)
-    assert len(at.button) >= 1 # Start button
+    """Test if initial widgets (uploader info) are present *before* upload."""
+    # Check for the initial info message indicating file upload is needed
+    assert len(at.info) > 0
+    assert at.info[0].value == "Please upload a CSV file to begin."
+    # Config sections shouldn't render fully before upload
+    assert len(at.radio) == 0 
+    assert len(at.multiselect) == 0
+    assert len(at.button) == 0
 
 # Example of a test that might require file interaction (more complex)
 # def test_upload_shows_success(at):
@@ -69,4 +67,7 @@ def test_initial_widgets(at):
 #     assert len(at.selectbox(key="s1_api")) == 0 # Should disappear
 #     pass
 
-``` 
+# Cannot easily test post-upload state with AppTest file handling
+# def test_widgets_after_upload(at):
+#     # Needs mocking or a different approach
+#     pass

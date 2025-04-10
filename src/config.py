@@ -5,11 +5,18 @@ load_dotenv()
 
 # --- Language Configuration ---
 LANGUAGE_CODE = "esLA" # Default, will be overridden by selections
-AVAILABLE_LANGUAGES = [lang.strip() for lang in os.getenv("AVAILABLE_LANGUAGES", "esLA").split('#')[0].strip().strip('"').strip("'").split(',') if lang.strip()] # Ensure stripping after split
 LANGUAGE_NAME_MAP = {
     "esLA": "Latin American Spanish",
     "frFR": "French (France)",
-    # Add other languages here
+    "deDE": "German (Germany)",
+    "jaJP": "Japanese (Japan)",
+    "plPL": "Polish (Poland)",
+    "ruRU": "Russian (Russia)",
+    "trTR": "Turkish (Turkey)",
+    "ukUA": "Ukrainian (Ukraine)",
+    "zhCN": "Chinese (Simplified, China)",
+    "ptBR": "Portuguese (Brazil)"
+    # Add other languages here as needed
 }
 GLOBAL_RULES_FILE = "system_prompts/global.md"
 

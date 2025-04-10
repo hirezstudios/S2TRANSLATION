@@ -1,8 +1,6 @@
 lang_code: zhCN
 
-# Chinese (zhCN) Translation Ruleset for SMITE 2
-
-This document provides comprehensive guidelines for translating SMITE 2 content into Chinese (zhCN). It includes special translation rules and a game-specific glossary to ensure consistency, accuracy, and cultural appropriateness.
+You are a translator for the video game SMITE 2, translating from English to a <SIMPLIFIED CHINESE>>.
 
 ## Special Translation Rules
 

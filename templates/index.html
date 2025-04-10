@@ -22,11 +22,11 @@
                 <label class="form-label d-block">Translation Mode</label>
                 <div class="mb-2">
                     <div class="form-check form-check-inline">
-                        <input class="form-check-input" type="radio" name="mode" id="mode_one" value="ONE_STAGE" checked>
+                        <input class="form-check-input" type="radio" name="mode" id="mode_one" value="ONE_STAGE">
                         <label class="form-check-label" for="mode_one">One Stage</label>
                     </div>
                     <div class="form-check form-check-inline">
-                        <input class="form-check-input" type="radio" name="mode" id="mode_three" value="THREE_STAGE">
+                        <input class="form-check-input" type="radio" name="mode" id="mode_three" value="THREE_STAGE" checked>
                         <label class="form-check-label" for="mode_three">Three Stage</label>
                     </div>
                 </div>
@@ -174,6 +174,27 @@
             startBtn.disabled = true;
             return;
         }
+        
+        // Add Select All / Unselect All buttons
+        const controlsDiv = document.createElement('div');
+        controlsDiv.classList.add('mb-2'); // Add some margin below the controls
+        const selectAllBtn = document.createElement('button');
+        selectAllBtn.type = 'button';
+        selectAllBtn.classList.add('btn', 'btn-outline-secondary', 'btn-sm', 'me-2');
+        selectAllBtn.textContent = 'Select All';
+        selectAllBtn.onclick = () => {
+            langOptionsDiv.querySelectorAll('input[name=\"languages\"]').forEach(cb => cb.checked = true);
+        };
+        const unselectAllBtn = document.createElement('button');
+        unselectAllBtn.type = 'button';
+        unselectAllBtn.classList.add('btn', 'btn-outline-secondary', 'btn-sm');
+        unselectAllBtn.textContent = 'Unselect All';
+        unselectAllBtn.onclick = () => {
+            langOptionsDiv.querySelectorAll('input[name=\"languages\"]').forEach(cb => cb.checked = false);
+        };
+        controlsDiv.appendChild(selectAllBtn);
+        controlsDiv.appendChild(unselectAllBtn);
+        langOptionsDiv.appendChild(controlsDiv);
         
         languages.forEach(lang => {
             const div = document.createElement('div');

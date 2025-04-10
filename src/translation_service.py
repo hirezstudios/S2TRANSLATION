@@ -472,6 +472,8 @@ def translate_row_worker(task_data, worker_config):
     source_text = task_data['source_text']
     row_identifier = f"{row_index+1}-{lang_code}"
     
+    logger.debug(f"WORKER [{task_id} / {row_identifier}]: Starting processing.") # Added log
+
     # Get config values passed from process_batch
     db_path = worker_config['db_path']
     translation_mode = worker_config['translation_mode']
@@ -485,7 +487,9 @@ def translate_row_worker(task_data, worker_config):
     target_column_tpl = worker_config['target_column_tpl']
     openai_client_obj = worker_config.get('openai_client')
 
+    logger.debug(f"WORKER [{task_id} / {row_identifier}]: Updating status to 'running'.") # Added log
     db_manager.update_task_status(db_path, task_id, 'running')
+    logger.debug(f"WORKER [{task_id} / {row_identifier}]: Status updated.") # Added log
     
     # Initialize local results variables
     final_translation_local = ""
@@ -500,7 +504,7 @@ def translate_row_worker(task_data, worker_config):
     audit_record_base = {"task_id": task_id, "row_index": task_data['row_index_in_file'] + 1, "language": lang_code, "mode": worker_config['translation_mode']}
 
     if not source_text:
-        logger.warning(f"Task {task_id} (Row {row_identifier}): Source text empty.")
+        logger.warning(f"WORKER [{task_id} / {row_identifier}]: Source text empty. Completing task.") # Added log
         final_status = 'completed'
         error_message_local = "Empty source text"
         approved_translation_local = "" # Empty approved for empty source
@@ -511,6 +515,7 @@ def translate_row_worker(task_data, worker_config):
                                        final_tx="", approved_tx=approved_translation_local, 
                                        review_sts=review_status_local, error_msg=error_message_local)
         log_audit_record(audit_record)
+        logger.debug(f"WORKER [{task_id} / {row_identifier}]: Finished processing empty source.") # Added log
         return True # Indicate success (completed handling empty source)
         
     try:
@@ -519,7 +524,7 @@ def translate_row_worker(task_data, worker_config):
         
         # Define the final instruction
         final_instruction = "\n\n**IMPORTANT FINAL INSTRUCTION: Your final output should contain ONLY the final text (translation/evaluation/revision). No extra text, formatting, or explanations.**"
-        
+
         # Construct the full ruleset (Global + Language Specific)
         lang_specific_part = prompt_manager.stage1_templates.get(lang_code)
         if not lang_specific_part:
@@ -531,13 +536,17 @@ def translate_row_worker(task_data, worker_config):
         # Stage 1 prompt = Full Ruleset + Final Instruction
         stage1_prompt = full_ruleset_prompt + final_instruction
         
+        logger.debug(f"WORKER [{task_id} / {row_identifier}]: Mode = {translation_mode}") # Added log
+        
         if translation_mode == "ONE_STAGE":
             api_to_use = default_api
             model_to_use = None 
             audit_record = {**audit_record_base, "api": api_to_use, "model": model_to_use or "default"} 
+            logger.debug(f"WORKER [{task_id} / {row_identifier}]: Calling API (One Stage) - API: {api_to_use}, Model: {model_to_use or 'default'}") # Added log
             final_translation_local = call_active_api(api_to_use, stage1_prompt, source_text, 
                                                 row_identifier=row_identifier, model_override=model_to_use,
                                                 openai_client_obj=openai_client_obj)
+            logger.debug(f"WORKER [{task_id} / {row_identifier}]: API call returned (One Stage).") # Added log
             if final_translation_local is not None and not final_translation_local.startswith("ERROR:BLOCKED:"):
                 final_status = 'completed'
                 approved_translation_local = final_translation_local
@@ -558,18 +567,22 @@ def translate_row_worker(task_data, worker_config):
             s1_api = stage1_api_cfg
             s1_model = stage1_model_override 
             audit_record = {**audit_record_base, "stage1_api": s1_api, "stage1_model": s1_model or "default"}
+            logger.debug(f"WORKER [{task_id} / {row_identifier}]: Calling API (Stage 1) - API: {s1_api}, Model: {s1_model or 'default'}") # Added log
             initial_translation_local = call_active_api(s1_api, stage1_prompt, source_text, 
                                                 row_identifier=f"{row_identifier}-S1", model_override=s1_model,
                                                 openai_client_obj=openai_client_obj)
+            logger.debug(f"WORKER [{task_id} / {row_identifier}]: API call returned (Stage 1).") # Added log
             audit_record["initial_translation"] = initial_translation_local
             # Update DB after S1
+            logger.debug(f"WORKER [{task_id} / {row_identifier}]: Updating DB after Stage 1.") # Added log
             db_manager.update_task_results(db_path, task_id, 'stage1_complete', initial_tx=initial_translation_local)
+            logger.debug(f"WORKER [{task_id} / {row_identifier}]: DB updated after Stage 1.") # Added log
 
             if initial_translation_local is None or initial_translation_local.startswith("ERROR:BLOCKED:"):
                 error_message_local = initial_translation_local or "Stage 1 failed"
                 final_translation_local = "" 
                 audit_record["error"] = error_message_local
-                log_audit_record(audit_record) 
+                log_audit_record(audit_record)
                 final_status = 'error' 
             else:
                 # --- Stage 2 --- 
@@ -579,21 +592,23 @@ def translate_row_worker(task_data, worker_config):
                 audit_record["stage2_model"] = s2_model or "default"
                 stage2_prompt = prompt_manager.get_full_prompt(stage=2, lang_code=lang_code, source_text=source_text, initial_translation=initial_translation_local)
                 eval_user_content = "Evaluate the provided translation based on the rules and context."
+                logger.debug(f"WORKER [{task_id} / {row_identifier}]: Calling API (Stage 2) - API: {s2_api}, Model: {s2_model or 'default'}") # Added log
                 evaluation_raw = call_active_api(s2_api, stage2_prompt, eval_user_content, 
                                            row_identifier=f"{row_identifier}-S2", model_override=s2_model,
                                            openai_client_obj=openai_client_obj)
+                logger.debug(f"WORKER [{task_id} / {row_identifier}]: API call returned (Stage 2).") # Added log
                 
                 evaluation_score_local = None
                 evaluation_feedback_local = None
                 if evaluation_raw and not evaluation_raw.startswith("ERROR:BLOCKED:"):
                     # ... (JSON cleaning and parsing logic) ...
-                    cleaned_json_str = evaluation_raw.strip() 
+                    cleaned_json_str = evaluation_raw.strip()
                     if cleaned_json_str.startswith("```json"): cleaned_json_str = cleaned_json_str[7:]
                     elif cleaned_json_str.startswith("```"): cleaned_json_str = cleaned_json_str[3:]
                     if cleaned_json_str.endswith("```"): cleaned_json_str = cleaned_json_str[:-3]
                     cleaned_json_str = cleaned_json_str.strip()
                     try:
-                        eval_data = json.loads(cleaned_json_str)
+                        eval_data = json.loads(cleaned_json_str) 
                         score = eval_data.get("score")
                         feedback = eval_data.get("feedback")
                         if isinstance(score, str) and score.isdigit(): score = int(score)
@@ -606,13 +621,15 @@ def translate_row_worker(task_data, worker_config):
                         evaluation_feedback_local = f"ERROR:PARSING:{e}"
                 elif evaluation_raw and evaluation_raw.startswith("ERROR:BLOCKED:"):
                     evaluation_feedback_local = evaluation_raw 
-                else: 
+                else:
                     evaluation_feedback_local = None # API call failed
 
                 audit_record["evaluation_score"] = evaluation_score_local
                 audit_record["evaluation_feedback"] = evaluation_feedback_local
                 # Update DB after S2
+                logger.debug(f"WORKER [{task_id} / {row_identifier}]: Updating DB after Stage 2.") # Added log
                 db_manager.update_task_results(db_path, task_id, 'stage2_complete', initial_tx=initial_translation_local, score=evaluation_score_local, feedback=evaluation_feedback_local)
+                logger.debug(f"WORKER [{task_id} / {row_identifier}]: DB updated after Stage 2.") # Added log
 
                 if evaluation_feedback_local is None or evaluation_feedback_local.startswith("ERROR:"):
                     final_translation_local = initial_translation_local # Fallback
@@ -629,9 +646,11 @@ def translate_row_worker(task_data, worker_config):
                     audit_record["stage3_model"] = s3_model or "default"
                     stage3_prompt = prompt_manager.get_full_prompt(stage=3, lang_code=lang_code, source_text=source_text, initial_translation=initial_translation_local, feedback=evaluation_feedback_local)
                     refine_user_content = "Revise the translation based on the provided context and feedback."
+                    logger.debug(f"WORKER [{task_id} / {row_identifier}]: Calling API (Stage 3) - API: {s3_api}, Model: {s3_model or 'default'}") # Added log
                     final_translation_local = call_active_api(s3_api, stage3_prompt, refine_user_content, 
                                                       row_identifier=f"{row_identifier}-S3", model_override=s3_model,
                                                       openai_client_obj=openai_client_obj)
+                    logger.debug(f"WORKER [{task_id} / {row_identifier}]: API call returned (Stage 3).") # Added log
                     audit_record["final_translation"] = final_translation_local
                     
                     if final_translation_local is None or final_translation_local.startswith("ERROR:BLOCKED:"):
@@ -672,7 +691,7 @@ def translate_row_worker(task_data, worker_config):
     # --- End Default Setting --- #
 
     # Final DB Update 
-    # Use the final determined local values
+    logger.debug(f"WORKER [{task_id} / {row_identifier}]: Performing final DB update. Status={final_status}") # Added log
     db_manager.update_task_results(
         db_path, task_id, final_status, 
         initial_translation_local, evaluation_score_local, evaluation_feedback_local, 
@@ -680,7 +699,9 @@ def translate_row_worker(task_data, worker_config):
         review_status_local, 
         error_message_local
     )
+    logger.debug(f"WORKER [{task_id} / {row_identifier}]: Final DB update complete.") # Added log
     
+    logger.debug(f"WORKER [{task_id} / {row_identifier}]: Finished processing. Returning {final_status == 'completed'}.") # Added log
     return final_status == 'completed' 
 
 # --- Background Batch Processing Function (Target for Flask's Thread) ---
@@ -741,27 +762,26 @@ def run_batch_background(batch_id):
         
         for future in tqdm(concurrent.futures.as_completed(future_to_task_id), total=total_tasks, desc=f"Translating Batch {batch_id}"):
             task_id = future_to_task_id[future]
+            logger.debug(f"BACKGROUND THREAD: Waiting for result from task {task_id}...") # Added log
             try:
                 # Worker now returns True for success (incl. fallback), False for error
-                completed_successfully = future.result() 
+                completed_successfully = future.result()
+                logger.debug(f"BACKGROUND THREAD: Result received for task {task_id}. Success={completed_successfully}") # Added log
                 if completed_successfully:
                     success_count += 1
                 else:
                     error_count += 1 # Worker handled logging/DB for specific error
             except Exception as exc:
-                # Find original task info for logging
-                original_task = next((t for t in tasks_to_process if t['task_id'] == task_id), None)
-                row_idx = original_task['row_index_in_file']+1 if original_task else '?'
-                lang = original_task['language_code'] if original_task else '??'
-                logger.exception(f"Task Future (id={task_id}, row={row_idx}-{lang}) generated exception: {exc}")
-                error_count += 1
-                try: 
-                    db_manager.update_task_status(db_path, task_id, 'error', f"Future execution error: {exc}")
+                logger.error(f'BACKGROUND THREAD: Task {task_id} generated an exception: {exc}', exc_info=True) # Log exception
+                error_count += 1 # Count it as an error
+                # Optionally update the specific task status to error here if worker didn't
+                try:
+                    db_manager.update_task_status(db_path, task_id, 'error', f'Unhandled worker exception: {exc}')
                 except Exception as db_exc:
-                    logger.error(f"Failed to update task status to error after future exception: {db_exc}")
+                     logger.error(f"BACKGROUND THREAD: Failed to update task {task_id} status after exception: {db_exc}")
 
-    logger.info(f"BACKGROUND THREAD: Batch {batch_id} processing finished in thread.")
-    logger.info(f"BACKGROUND THREAD: Successfully completed tasks: {success_count}")
+    logger.info(f"BACKGROUND THREAD: Task processing complete for batch {batch_id}. Success: {success_count}, Errors: {error_count}") # Added confirmation log
+    # --- Final Status Update (existing code follows) --- #
     logger.info(f"BACKGROUND THREAD: Tasks ending in error state: {error_count}")
     
     # Determine final batch status based on *task errors*
@@ -796,8 +816,9 @@ def prepare_batch(input_file_path, original_filename, selected_languages, mode_c
 
             for i, row in enumerate(reader):
                 source_text = row.get(config.SOURCE_COLUMN, "").strip()
-                metadata = {col: row.get(col, "") for col in metadata_columns} 
+                metadata = {col: row.get(col, "") for col in metadata_columns}
                 metadata_json = json.dumps(metadata)
+                logger.debug(f"Batch {batch_id}, Row {i}: Prepared metadata_json: {metadata_json}") 
                 
                 for lang_code in selected_languages:
                     target_col_name = config.TARGET_COLUMN_TPL.format(lang_code=lang_code)
@@ -805,6 +826,7 @@ def prepare_batch(input_file_path, original_filename, selected_languages, mode_c
                     if lang_code in prompt_manager.stage1_templates and target_col_name in target_columns_in_file:
                          # Add task details to a list for bulk insertion later?
                          # For now, add one by one
+                         logger.debug(f"Batch {batch_id}, Row {i}, Lang {lang_code}: Calling add_translation_task...") # Added log
                          db_manager.add_translation_task(db_path, batch_id, i, lang_code, source_text, metadata_json)
                          # tasks_to_create.append((batch_id, i, lang_code, source_text, metadata_json))
                     elif lang_code not in prompt_manager.stage1_templates:

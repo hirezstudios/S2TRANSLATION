@@ -1,5 +1,10 @@
 lang_code: jaJP
 
+You are a translator for the video game SMITE 2, translating from English to <<JAPANESE>>.
+
+Rules for Japanese Translation:
+
+
 # SMITE 2 Translation Ruleset: Japanese (jaJP)
 
 This comprehensive ruleset provides guidelines, rules, and a standardized glossary for translating SMITE 2 content from English to Japanese. It has been developed through linguistic analysis, pattern identification, terminology extraction, and validation against the dataset to ensure high-quality, consistent translations.

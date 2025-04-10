@@ -14,8 +14,15 @@ from src import translation_service
 from src import prompt_manager
 from src import api_clients
 
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(name)s - %(message)s')
+# Configure logging
+logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(name)s - %(message)s') # Changed level to DEBUG
 logger = logging.getLogger(__name__)
+
+# --- Explicitly set levels for module loggers --- #
+logging.getLogger('src.translation_service').setLevel(logging.DEBUG)
+logging.getLogger('src.db_manager').setLevel(logging.DEBUG)
+logger.info("Log levels for src.translation_service and src.db_manager set to DEBUG.")
+# --- End Explicit level setting --- #
 
 # --- Flask App Setup ---
 def create_app():
@@ -84,9 +91,9 @@ def create_app():
             
             potential_langs = {col[3:] for col in header if col.startswith("tg_")}
             
-            # Intersect with configured languages and those with prompts
-            for lang_code in config.AVAILABLE_LANGUAGES:
-                if lang_code in potential_langs and lang_code in prompt_manager.stage1_templates:
+            # Iterate over dynamically discovered languages with prompts
+            for lang_code in prompt_manager.available_languages:
+                if lang_code in potential_langs:
                     valid_languages.append(lang_code)
                     
             logger.info(f"Valid languages identified: {valid_languages}")
@@ -307,6 +314,10 @@ def create_app():
     def view_results(batch_id):
         """Displays the results of a translation batch for review."""
         logger.info(f"Received request to view results for batch {batch_id}")
+        # --- Force DEBUG level for this specific route --- #
+        logger.setLevel(logging.DEBUG) 
+        logger.debug("Logger level explicitly set to DEBUG for /results route.")
+        # --- End Force DEBUG level --- #
         db_path = config.DATABASE_FILE
         try:
             batch_info = db_manager.get_batch_info(db_path, batch_id)
@@ -322,7 +333,25 @@ def create_app():
                     logger.warning(f"Could not parse config_details for batch {batch_id}")
             
             tasks_raw = db_manager.get_tasks_for_review(db_path, batch_id)
-            tasks_list = [dict(task) for task in tasks_raw]
+            tasks_list = []
+            for task in tasks_raw:
+                task_dict = dict(task)
+                record_id = "N/A" # Default value
+                raw_metadata_json = task_dict.get('metadata_json') # Get raw JSON
+                logger.debug(f"Task {task_dict.get('task_id')}: Raw metadata_json: {raw_metadata_json}") # Log raw JSON
+                try:
+                    metadata = json.loads(raw_metadata_json or '{}')
+                    logger.debug(f"Task {task_dict.get('task_id')}: Parsed metadata: {metadata}") # Log parsed dict
+                    record_id = metadata.get("Record ID", "N/A") # Extract Record ID
+                    if record_id == "N/A" and "Record ID" in metadata:
+                        logger.warning(f"Task {task_dict.get('task_id')}: 'Record ID' key exists but value might be empty/null.")
+                except json.JSONDecodeError:
+                    logger.warning(f"Could not parse metadata_json for task {task_dict.get('task_id')}")
+                except Exception as e:
+                     logger.warning(f"Error processing metadata for task {task_dict.get('task_id')}: {e}")
+                
+                task_dict['record_id'] = record_id # Add to dictionary
+                tasks_list.append(task_dict)
 
             return render_template('results.html', 
                                    batch=batch_info, 
@@ -464,6 +493,23 @@ def create_app():
         except Exception as e:
             logger.exception(f"Error retranslating task {task_id}: {e}")
             return jsonify({"error": "An internal error occurred during re-translation."}), 500
+
+    # --- Batch History Route --- #
+    @app.route('/history')
+    def batch_history():
+        """Displays a list of past translation batches."""
+        logger.info("Received request for /history")
+        db_path = config.DATABASE_FILE
+        try:
+            batches_raw = db_manager.get_all_batches_for_history(db_path)
+            batches_list = [dict(batch) for batch in batches_raw]
+            # Convert timestamp strings if needed for display formatting? 
+            # Tabulator can handle ISO format though.
+            return render_template('history.html', batches=batches_list)
+        except Exception as e:
+            logger.exception(f"Error fetching batch history: {e}")
+            # Render history page with an error message? Or redirect?
+            return render_template('history.html', batches=[], error="Failed to load batch history.")
 
     # Placeholder for other routes: /rules
     @app.route('/placeholder')

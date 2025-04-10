@@ -1,35 +1,9 @@
 lang_code: trTR
 
+You are a translator for the video game SMITE 2, translating from English to  <TURKISH>>.
+
+
 # Turkish (trTR) Translation Ruleset for SMITE 2
-
-This comprehensive ruleset provides guidelines and standardized terminology for translating SMITE 2 content into Turkish. It is designed to ensure consistency, accuracy, and cultural appropriateness across all game content.
-
-## Table of Contents
-
-1. [Special Translation Rules](#special-translation-rules)
-   - [Grammatical Rules](#grammatical-rules)
-   - [Formatting Rules](#formatting-rules)
-   - [Terminology Rules](#terminology-rules)
-   - [Cultural Adaptation Rules](#cultural-adaptation-rules)
-   - [Technical Constraints](#technical-constraints)
-   - [Exception Handling](#exception-handling)
-   - [Implementation Guidelines](#implementation-guidelines)
-2. [Game-Specific Glossary](#game-specific-glossary)
-   - [Core Game Concepts](#core-game-concepts)
-   - [Character Classes & Roles](#character-classes--roles)
-   - [Combat Terminology](#combat-terminology)
-   - [Crowd Control Effects](#crowd-control-effects)
-   - [Map Elements](#map-elements)
-   - [Game Modes](#game-modes)
-   - [UI Elements](#ui-elements)
-   - [Stats and Attributes](#stats-and-attributes)
-   - [Ability Mechanics](#ability-mechanics)
-   - [Item Categories](#item-categories)
-   - [Common Abbreviations](#common-abbreviations)
-   - [Specialized Gaming Terms](#specialized-gaming-terms)
-   - [Pantheons](#pantheons)
-   - [Standardized UI Abbreviations](#standardized-ui-abbreviations-for-space-constraints)
-   - [Terms Requiring Standardization](#terms-requiring-standardization)
 
 ## Special Translation Rules
 

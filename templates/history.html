@@ -1,0 +1,128 @@
+{% extends 'base.html' %}
+
+{% block title %}Batch History{% endblock %}
+
+{% block content %}
+    <nav aria-label="breadcrumb">
+        <ol class="breadcrumb">
+            <li class="breadcrumb-item"><a href="{{ url_for('index') }}">Home</a></li>
+            <li class="breadcrumb-item active" aria-current="page">Batch History</li>
+        </ol>
+    </nav>
+
+    <h2>Batch History</h2>
+
+    {% if error %}
+        <div class="alert alert-danger" role="alert">
+            {{ error }}
+        </div>
+    {% endif %}
+
+    {% if batches %}
+        <!-- Container for Tabulator table -->
+        <div id="history-table"></div>
+    {% else %}
+        <p class="text-info">No batch history found.</p>
+    {% endif %}
+
+{% endblock %}
+
+{% block scripts %}
+    <script>
+        // Pass Flask data to JavaScript
+        // The line below uses Jinja templating. Linters might flag this as an error,
+        // but it is correct for rendering Flask data into JavaScript.
+        const batchData = {{ batches|tojson }};
+        console.log("Batch data received:", batchData);
+
+        // Custom formatter for batch status badges
+        const statusFormatter = function(cell, formatterParams, onRendered){
+            const status = cell.getValue();
+            let bgColor = 'secondary';
+            if (status === 'pending') bgColor = 'info';
+            else if (status === 'processing') bgColor = 'primary';
+            else if (status === 'completed') bgColor = 'success';
+            else if (status === 'completed_with_errors') bgColor = 'warning';
+            else if (status === 'failed' || status === 'completed_empty') bgColor = 'danger';
+            return `<span class="badge bg-${bgColor}">${status}</span>`;
+        };
+        
+        // Custom formatter for timestamp
+        const dateTimeFormatter = function(cell, formatterParams, onRendered){
+            const value = cell.getValue();
+            if(value){
+                try {
+                    return new Date(value).toLocaleString(); 
+                } catch(e) {
+                    return value; // fallback to original value if parsing fails
+                }
+            } 
+            return "";
+        };
+
+        // Custom formatter for action button
+        const actionFormatter = function(cell, formatterParams, onRendered){
+            const batchId = cell.getRow().getData().batch_id;
+            const resultsUrl = "{{ url_for('view_results', batch_id='BATCH_ID_PLACEHOLDER') }}".replace('BATCH_ID_PLACEHOLDER', batchId);
+            return `<a href="${resultsUrl}" class="btn btn-sm btn-primary">View Results</a>`;
+        };
+
+        // Initialize Tabulator
+        const table = new Tabulator("#history-table", {
+            data: batchData,
+            index: "batch_id", // Use batch_id from data as the unique row index
+            layout: "fitColumns",
+            pagination: "local",
+            paginationSize: 25,
+            paginationSizeSelector: [10, 25, 50, 100, true],
+            columns: [
+                {
+                    title: "Date", 
+                    field: "upload_timestamp", 
+                    width: 180, 
+                    formatter: dateTimeFormatter, 
+                    headerFilter: "input", // Add date filtering later if needed
+                    headerFilterPlaceholder: "Filter Date..."
+                },
+                {
+                    title: "Filename", 
+                    field: "upload_filename", 
+                    headerFilter: "input", 
+                    headerFilterPlaceholder:"Filter Filename...", 
+                    tooltip: true, 
+                    minWidth: 150
+                },
+                {
+                    title: "Status", 
+                    field: "status", 
+                    width: 180, 
+                    hozAlign: "center", 
+                    formatter: statusFormatter, 
+                    headerFilter: "select", 
+                    headerFilterParams:{values:["", "pending", "processing", "completed", "completed_with_errors", "failed", "completed_empty"], sortValuesList: "asc"},
+                    headerFilterPlaceholder: "Filter Status..."
+                },
+                {
+                    title: "Batch ID", 
+                    field: "batch_id", 
+                    width: 150, 
+                    tooltip: true, 
+                    formatter: function(cell) { // Shorten ID display
+                        return cell.getValue() ? cell.getValue().substring(0, 8) + '...' : '';
+                    }
+                },
+                { 
+                    title: "Actions", 
+                    formatter: actionFormatter, 
+                    hozAlign: "center", 
+                    width: 120, 
+                    headerSort: false 
+                }
+            ],
+            initialSort:[ 
+                {column:"upload_timestamp", dir:"desc"}, 
+            ]
+        });
+
+    </script>
+{% endblock %} 

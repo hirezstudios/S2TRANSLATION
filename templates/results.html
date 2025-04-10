@@ -57,9 +57,9 @@
         // Custom formatter for action buttons
         const actionFormatter = function(cell, formatterParams, onRendered){
             const taskId = cell.getRow().getData().task_id;
+            // Removed Deny button, using text for Re-translate button
             const buttons = `
-                <button class="btn btn-sm btn-outline-primary me-1" onclick="handleRetranslate(${taskId})">Re-translate</button>
-                <button class="btn btn-sm btn-outline-danger" onclick="handleReview(${taskId}, 'denied')">Deny</button>
+                <button class="btn btn-sm btn-outline-primary me-1" title="Re-translate" onclick="handleRetranslate(${taskId})">Translate</button> 
             `;
             return buttons;
         };
@@ -68,21 +68,22 @@
         const table = new Tabulator("#results-table", {
             data: taskData,           
             index: "task_id", // Use task_id from data as the unique row index
-            layout: "fitDataTable",   
+            layout: "fitColumns",   // Changed from fitDataTable
             pagination: "local",      
             paginationSize: 50,       
             paginationSizeSelector: [10, 50, 100, 500, true], 
             columns: [
-                { title: "#", field: "row_index_in_file", formatter: "rownum", hozAlign: "center", width: 60, frozen:true, resizable:false },
-                { title: "ID", field: "task_id", width: 70, visible: false }, 
-                { title: "Lang", field: "language_code", width: 70, headerFilter: "input", frozen:true, resizable:false },
+                { title: "#", field: "row_index_in_file", formatter: "rownum", hozAlign: "center", width: 60, frozen:true, resizable:false, visible: true }, // Unhidden
+                { title: "ID", field: "task_id", width: 60, visible: false }, // Hidden
+                { title: "Record ID", field: "record_id", width: 150, tooltip: true, headerFilter: "input", frozen:true },
+                { title: "Lang", field: "language_code", width: 70, headerFilter: "input", frozen:true, resizable:false }, // Width 70
                 { 
                     title: "Source Text", 
                     field: "source_text", 
                     headerFilter: "input", 
                     headerFilterPlaceholder:"Filter Source...", 
                     tooltip: true, 
-                    width: "25%",
+                    width: "20%",
                     formatter: "textarea",
                     resizable: true
                 },
@@ -92,7 +93,7 @@
                     headerFilter: "input", 
                     headerFilterPlaceholder:"Filter LLM Output...", 
                     tooltip: true, 
-                    width: "30%",
+                    width: "20%",
                     formatter: "textarea",
                     resizable: true
                 },
@@ -102,7 +103,7 @@
                     headerFilter: "input",
                     headerFilterPlaceholder:"Filter Approved...",
                     tooltip: true,
-                    width: "30%",
+                    width: "20%",
                     editor: "textarea", 
                     formatter: "textarea", 
                     resizable: true,
@@ -156,7 +157,7 @@
                              // maybe fallback to final_translation in this specific case?
                              if (approvedText === null) {
                                 approvedText = rowData.final_translation; 
-                                logger.warning(`Task ${taskId}: Status changed to approved_edited, but approved_translation was null. Using final_translation as base.`);
+                                console.warn(`Task ${taskId}: Status changed to approved_edited, but approved_translation was null. Using final_translation as base.`);
                              }
                         } else if (newStatus === 'denied') {
                              approvedText = null; // Explicitly null for denied
@@ -173,7 +174,7 @@
                     title: "Actions", 
                     formatter: actionFormatter, 
                     hozAlign: "center", 
-                    width: 200, 
+                    width: 80, // Width 80
                     headerSort: false, 
                     resizable: false
                 }

@@ -7,4 +7,5 @@ output/
 __pycache__/
 *.pyc
 temp_uploads/
-.specstory/ 
+.specstory/
+user_prompts/ 

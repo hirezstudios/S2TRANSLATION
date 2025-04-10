@@ -4,7 +4,17 @@
 
 {% block content %}
     <h2>Edit: {{ description }}</h2>
-    <small class="text-muted mb-3 d-block">File: {{ filename }}</small>
+    <small class="text-muted mb-2 d-block">File: {{ filename }}</small>
+    {# Add a note if this is the first edit (loaded from base) #}
+    {% if is_editing_base %}
+        <div class="alert alert-info" role="alert">
+            You are editing the base version of this rule. Your changes will be saved as a new user-specific override in the <code>user_prompts/</code> directory. The original system rule will remain unchanged.
+        </div>
+    {% else %}
+         <div class="alert alert-secondary" role="alert">
+            You are editing your user-specific override of this rule. Changes will be saved to <code>user_prompts/{{ filename }}</code>.
+        </div>
+    {% endif %}
 
     {# Display flashed messages if save fails #}
     {% with messages = get_flashed_messages(with_categories=true) %}
@@ -19,10 +29,11 @@
     {% endwith %}
 
     <form id="edit-rule-form" method="post" action="{{ url_for('edit_rule', filename=filename) }}">
+        {# Removed label, title is sufficient #}
         <div class="mb-3">
-            <label for="codemirror-editor" class="form-label">Rule Content:</label>
+            {# <label for="codemirror-editor" class="form-label">Rule Content:</label> #}
             {# This textarea will be replaced by CodeMirror, but holds the initial value and submitted value #}
-            <textarea id="codemirror-editor" name="edited_content" class="form-control" style="height: 1000px;">{{ content }}</textarea>
+            <textarea id="codemirror-editor" name="edited_content" class="form-control" style="height: 800px;">{{ content }}</textarea> {# Increased height further #}
         </div>
         
         <button type="submit" class="btn btn-primary">Save Changes</button>
@@ -41,7 +52,7 @@
     <!-- Add custom styles for CodeMirror font size -->
     <style>
       .CodeMirror {
-        font-size: 0.7em; /* Adjust as needed */
+        font-size: 0.9em; /* Adjust as needed */
         border: 1px solid #ced4da; /* Add a subtle border like other form elements */
         border-radius: 0.25rem;
       }

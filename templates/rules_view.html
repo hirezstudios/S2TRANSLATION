@@ -3,13 +3,31 @@
 {% block title %}View Rule: {{ description }}{% endblock %}
 
 {% block content %}
-    <div class="d-flex justify-content-between align-items-center mb-3">
+    <div class="d-flex justify-content-between align-items-center mb-1">
         <div>
             <h2>{{ description }}</h2>
             <small class="text-muted">File: {{ filename }}</small>
         </div>
-        <a href="{{ url_for('edit_rule', filename=filename) }}" class="btn btn-primary">Edit Rule</a>
+        <div>
+            {# Show 'View Base' link only if viewing an override AND the base file exists #}
+            {% if status == 'User Override' and has_base_file %}
+                <a href="{{ url_for('view_base_rule', filename=filename) }}" class="btn btn-sm btn-outline-secondary me-2">View Base Version</a>
+            {% endif %}
+            {# Only show Edit button if not explicitly viewing the base version #}
+            {% if not is_base_view %}
+                 <a href="{{ url_for('edit_rule', filename=filename) }}" class="btn btn-primary">Edit Rule</a>
+            {% endif %}
+        </div>
     </div>
+    {# Show status badge #}
+    <p>
+        {% if status == 'User Override' %}
+            <span class="badge bg-info">Showing User Edited Version</span>
+        {% elif status == 'System Base' %}
+            <span class="badge bg-secondary">Showing System Base Version</span>
+        {% endif %}
+    </p>
+
 
     {# Display flashed messages if redirected here #}
     {% with messages = get_flashed_messages(with_categories=true) %}
@@ -25,7 +43,8 @@
 
     <div class="card">
         <div class="card-body">
-            <pre style="white-space: pre-wrap; word-wrap: break-word;">{{ content }}</pre>
+            {# Use CodeMirror for viewing too for consistency? Or keep pre? Keep pre for now. #}
+            <pre style="white-space: pre-wrap; word-wrap: break-word; font-family: monospace;">{{ content }}</pre>
         </div>
     </div>
 

@@ -245,88 +245,84 @@ def call_perplexity_api(system_prompt, user_content, row_identifier="N/A", model
             
     return None 
 
-def call_openai_api(openai_client_obj, system_prompt, user_content, row_identifier="N/A", model_override=None):
-    """Calls the OpenAI Responses API for translation with retry logic and parses the output."""
-    target_model = model_override if model_override else config.OPENAI_MODEL
-    # Use passed client object
-    if not openai_client_obj or not target_model:
-        with print_lock: logger.error(f"[OpenAI Row {row_identifier}]: Client object not provided or Model missing.")
+def call_openai_api(openai_client_obj, system_prompt, user_content, row_identifier="N/A", model_to_use=None):
+    """Calls the OpenAI API for translation with retry logic. Assumes model_to_use is valid."""
+    # Use passed client object and model name
+    if not openai_client_obj or not model_to_use:
+        # This check should ideally be caught by call_active_api now, but keep as safety net
+        logger.error(f"[OpenAI Row {row_identifier}]: Client object or Model name missing in call_openai_api.")
         return None
 
-    current_retry_delay = API_INITIAL_RETRY_DELAY
+    current_retry_delay = API_INITIAL_RETRY_DELAY # Use config value
     for attempt in range(API_MAX_RETRIES + 1):
         try:
-            response = openai_client_obj.responses.create(
-                model=target_model,
-                input=user_content, # Direct string input for simple text
-                instructions=system_prompt,
+            # Use the chat completions endpoint for better compatibility (like gpt-3.5-turbo, gpt-4 etc)
+            response = openai_client_obj.chat.completions.create(
+                model=model_to_use,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_content}
+                ],
                 temperature=0.2,
-                max_output_tokens=1024 # Added a limit, adjust if needed
+                max_tokens=2048 # Adjusted max_tokens potentially
             )
+            # logger.debug(f"[OpenAI Row {row_identifier}] Full API Response: {response}") # DEBUG
 
-            # Check response status and extract text
-            if response.status == 'completed' and response.output:
-                # Access the text content - assuming simple text output based on API docs
-                # The structure is response.output[0].content[0].text
-                if (response.output[0].type == 'message' and 
-                    response.output[0].content and 
-                    response.output[0].content[0].type == 'output_text'):
-                    
-                    translation = response.output[0].content[0].text.strip()
-                    # OpenAI might not need the <think> parsing, but check if needed
-                    # Add parsing here if OpenAI includes unwanted prefixes/suffixes
-                    if translation:
-                        return translation
-                    else:
-                         with print_lock:
-                            print(f"Warning [OpenAI Row {row_identifier}]: Translation result empty.")
-                         return ""
+            # Check response status and extract text from choices
+            if response.choices and response.choices[0].message and response.choices[0].message.content:
+                translation = response.choices[0].message.content.strip()
+                # Add any necessary parsing here if needed (e.g., removing markdown)
+                if translation:
+                    # Log finish reason if available
+                    finish_reason = response.choices[0].finish_reason
+                    if finish_reason != 'stop':
+                        logger.warning(f"[OpenAI Row {row_identifier}] Finish reason was not 'stop': {finish_reason}")
+                    return translation
                 else:
-                    with print_lock:
-                        print(f"Warning [OpenAI Row {row_identifier}]: Unexpected output structure in response.")
-                        # print(response) # Optional: log full response
-                    return "" # Unexpected structure
-            elif response.status == 'failed':
-                # Raise an exception to trigger retry logic for API-level failures
-                error_message = f"OpenAI API call failed: {response.error}"
-                raise openai.APIError(error_message) # Use appropriate OpenAI exception if available
-            else: # Handle in_progress, incomplete etc. if necessary, or treat as error for retry
-                 raise openai.APIError(f"OpenAI API call returned status: {response.status}")
+                    with print_lock: logger.warning(f"[OpenAI Row {row_identifier}]: Translation result empty.")
+                    return "" # Return empty string for empty result
+            else:
+                with print_lock: logger.warning(f"[OpenAI Row {row_identifier}]: Unexpected output structure in response. Choices: {response.choices}")
+                return "" # Unexpected structure
 
-        # --- Retry Logic --- 
+        # --- Retry Logic (using updated exception names if needed) --- 
         except openai.APITimeoutError:
-             with print_lock:
-                print(f"Attempt {attempt + 1}/{API_MAX_RETRIES + 1} [OpenAI Row {row_identifier}]: API call timed out.")
+             with print_lock: logger.error(f"Attempt {attempt + 1}/{API_MAX_RETRIES + 1} [OpenAI Row {row_identifier}]: API call timed out.")
         except openai.APIConnectionError as e:
-             with print_lock:
-                print(f"Attempt {attempt + 1}/{API_MAX_RETRIES + 1} [OpenAI Row {row_identifier}]: Network error - {e}")
+             with print_lock: logger.error(f"Attempt {attempt + 1}/{API_MAX_RETRIES + 1} [OpenAI Row {row_identifier}]: Network error - {e}")
         except openai.RateLimitError as e:
-             with print_lock:
-                print(f"Attempt {attempt + 1}/{API_MAX_RETRIES + 1} [OpenAI Row {row_identifier}]: Rate limit exceeded - {e}")
+             # Log specific rate limit error details if available
+             logger.error(f"Attempt {attempt + 1}/{API_MAX_RETRIES + 1} [OpenAI Row {row_identifier}]: Rate limit exceeded - {e}")
+             # Consider longer backoff for rate limits?
+             current_retry_delay *= 1.5 # Slightly longer wait for rate limit
         except openai.APIStatusError as e:
-             with print_lock:
-                print(f"Attempt {attempt + 1}/{API_MAX_RETRIES + 1} [OpenAI Row {row_identifier}]: API Status Error ({e.status_code}) - {e.response}")
-             # Potentially treat some status codes (e.g., 5xx) differently if needed
+             with print_lock: logger.error(f"Attempt {attempt + 1}/{API_MAX_RETRIES + 1} [OpenAI Row {row_identifier}]: API Status Error ({e.status_code}) - {e.response}")
+             # Stop retrying on certain client errors like 400 Bad Request? 
+             if e.status_code == 400:
+                 logger.error(f"[OpenAI Row {row_identifier}]: Bad request (400), stopping retries.")
+                 return f"ERROR:API:Bad Request:{e.response}"
+             if e.status_code == 401:
+                  logger.error(f"[OpenAI Row {row_identifier}]: Authentication error (401), stopping retries. Check API Key.")
+                  return f"ERROR:API:Authentication Error"
+             if e.status_code == 429: # Sometimes rate limits come as 429 status errors
+                 logger.error(f"Attempt {attempt + 1}/{API_MAX_RETRIES + 1} [OpenAI Row {row_identifier}]: Rate limit exceeded (429 status) - {e.response}")
+                 current_retry_delay *= 1.5 
         except openai.APIError as e: # Catch broader OpenAI errors
-             with print_lock:
-                print(f"Attempt {attempt + 1}/{API_MAX_RETRIES + 1} [OpenAI Row {row_identifier}]: OpenAI API Error - {e}")
+             with print_lock: logger.error(f"Attempt {attempt + 1}/{API_MAX_RETRIES + 1} [OpenAI Row {row_identifier}]: OpenAI API Error - {e}")
         except Exception as e: # Catch any other unexpected errors
-             with print_lock:
-                print(f"Attempt {attempt + 1}/{API_MAX_RETRIES + 1} [OpenAI Row {row_identifier}]: Unexpected Error - {e}")
+             logger.exception(f"Attempt {attempt + 1}/{API_MAX_RETRIES + 1} [OpenAI Row {row_identifier}]: Unexpected Error during OpenAI call - {e}")
         
         # Prepare for retry if applicable
         if attempt < API_MAX_RETRIES:
             wait_time = min(current_retry_delay + random.uniform(0, 1), API_MAX_RETRY_DELAY)
-            with print_lock:
-                print(f"Retrying [OpenAI Row {row_identifier}] in {wait_time:.2f} seconds...")
+            with print_lock: logger.info(f"Retrying [OpenAI Row {row_identifier}] in {wait_time:.2f} seconds...")
             time.sleep(wait_time)
             current_retry_delay *= 2
         else:
-            with print_lock:
-                print(f"Error [OpenAI Row {row_identifier}]: Max retries reached for: '{user_content[:50]}...'")
+            with print_lock: logger.error(f"Error [OpenAI Row {row_identifier}]: Max retries reached for row.")
             return None # Indicate final failure
 
-    return None
+    return None # Should not be reached if loop completes, but safety return
 
 def call_gemini_api(system_prompt, user_content, row_identifier="N/A", model_override=None):
     """Calls the Gemini API for translation with retry logic and parses the output."""
@@ -434,18 +430,38 @@ def call_gemini_api(system_prompt, user_content, row_identifier="N/A", model_ove
 
 # --- Dispatcher --- 
 
-def call_active_api(target_api, system_prompt, user_content, row_identifier="N/A", model_override=None, openai_client_obj=None):
-    """Calls the specified target API, passing necessary client."""
+def call_active_api(target_api, system_prompt, user_content, row_identifier="N/A", model_override=None):
+    """Calls the specified target API, fetching client and determining model internally."""
+    
+    # Ensure api_clients module is loaded
+    # (Assumed to be loaded correctly at module import)
+
     if target_api == "PERPLEXITY":
-        return call_perplexity_api(system_prompt, user_content, row_identifier, model_override)
+        # Perplexity function handles its own model default logic
+        model_to_use = model_override # Pass override, let function handle default if None
+        return call_perplexity_api(system_prompt, user_content, row_identifier, model_to_use)
+        
     elif target_api == "OPENAI":
-        return call_openai_api(openai_client_obj, system_prompt, user_content, row_identifier, model_override)
+        openai_client_obj = api_clients.get_openai_client()
+        if not openai_client_obj:
+            logger.error(f"[Row {row_identifier}] Failed to get OpenAI client.")
+            return f"ERROR:INTERNAL:OpenAI Client Failed"
+        # Determine model, ensuring we have a valid one
+        model_to_use = model_override if model_override else config.OPENAI_MODEL 
+        if not model_to_use:
+            logger.error(f"[Row {row_identifier}] No OpenAI model specified (override or default in config). Cannot proceed.")
+            return f"ERROR:CONFIG:OpenAI Model Missing"
+        # Pass the determined model explicitly to call_openai_api
+        return call_openai_api(openai_client_obj, system_prompt, user_content, row_identifier, model_to_use)
+        
     elif target_api == "GEMINI":
-        return call_gemini_api(system_prompt, user_content, row_identifier, model_override)
+        # Gemini function handles its own model default logic
+        model_to_use = model_override # Pass override, let function handle default if None
+        return call_gemini_api(system_prompt, user_content, row_identifier, model_to_use)
+        
     else:
-        with print_lock:
-            print(f"Error: Unsupported target_api value '{target_api}'.")
-        return None
+        logger.error(f"Error: Unsupported target_api value '{target_api}' in call_active_api.")
+        return f"ERROR:INTERNAL:Unsupported API"
 
 # --- Audit Logging --- 
 def log_audit_record(record):
@@ -544,8 +560,7 @@ def translate_row_worker(task_data, worker_config):
             audit_record = {**audit_record_base, "api": api_to_use, "model": model_to_use or "default"} 
             logger.debug(f"WORKER [{task_id} / {row_identifier}]: Calling API (One Stage) - API: {api_to_use}, Model: {model_to_use or 'default'}") # Added log
             final_translation_local = call_active_api(api_to_use, stage1_prompt, source_text, 
-                                                row_identifier=row_identifier, model_override=model_to_use,
-                                                openai_client_obj=openai_client_obj)
+                                                row_identifier=row_identifier, model_override=model_to_use)
             logger.debug(f"WORKER [{task_id} / {row_identifier}]: API call returned (One Stage).") # Added log
             if final_translation_local is not None and not final_translation_local.startswith("ERROR:BLOCKED:"):
                 final_status = 'completed'
@@ -569,8 +584,7 @@ def translate_row_worker(task_data, worker_config):
             audit_record = {**audit_record_base, "stage1_api": s1_api, "stage1_model": s1_model or "default"}
             logger.debug(f"WORKER [{task_id} / {row_identifier}]: Calling API (Stage 1) - API: {s1_api}, Model: {s1_model or 'default'}") # Added log
             initial_translation_local = call_active_api(s1_api, stage1_prompt, source_text, 
-                                                row_identifier=f"{row_identifier}-S1", model_override=s1_model,
-                                                openai_client_obj=openai_client_obj)
+                                                row_identifier=f"{row_identifier}-S1", model_override=s1_model)
             logger.debug(f"WORKER [{task_id} / {row_identifier}]: API call returned (Stage 1).") # Added log
             audit_record["initial_translation"] = initial_translation_local
             # Update DB after S1
@@ -594,8 +608,7 @@ def translate_row_worker(task_data, worker_config):
                 eval_user_content = "Evaluate the provided translation based on the rules and context."
                 logger.debug(f"WORKER [{task_id} / {row_identifier}]: Calling API (Stage 2) - API: {s2_api}, Model: {s2_model or 'default'}") # Added log
                 evaluation_raw = call_active_api(s2_api, stage2_prompt, eval_user_content, 
-                                           row_identifier=f"{row_identifier}-S2", model_override=s2_model,
-                                           openai_client_obj=openai_client_obj)
+                                           row_identifier=f"{row_identifier}-S2", model_override=s2_model)
                 logger.debug(f"WORKER [{task_id} / {row_identifier}]: API call returned (Stage 2).") # Added log
                 
                 evaluation_score_local = None
@@ -648,8 +661,7 @@ def translate_row_worker(task_data, worker_config):
                     refine_user_content = "Revise the translation based on the provided context and feedback."
                     logger.debug(f"WORKER [{task_id} / {row_identifier}]: Calling API (Stage 3) - API: {s3_api}, Model: {s3_model or 'default'}") # Added log
                     final_translation_local = call_active_api(s3_api, stage3_prompt, refine_user_content, 
-                                                      row_identifier=f"{row_identifier}-S3", model_override=s3_model,
-                                                      openai_client_obj=openai_client_obj)
+                                                      row_identifier=f"{row_identifier}-S3", model_override=s3_model)
                     logger.debug(f"WORKER [{task_id} / {row_identifier}]: API call returned (Stage 3).") # Added log
                     audit_record["final_translation"] = final_translation_local
                     

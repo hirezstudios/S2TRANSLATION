@@ -24,67 +24,107 @@ logger = logging.getLogger(__name__)
 # --- Explicitly set levels for module loggers --- #
 logging.getLogger('src.translation_service').setLevel(logging.DEBUG)
 logging.getLogger('src.db_manager').setLevel(logging.DEBUG)
-logger.info("Log levels for src.translation_service and src.db_manager set to DEBUG.")
+logging.getLogger('src.prompt_manager').setLevel(logging.INFO) # Set prompt_manager to INFO for less noise
+logger.info("Log levels configured.")
 # --- End Explicit level setting --- #
 
 # --- Constants for Rules Feature ---
-PROMPT_DIR = os.path.join(os.path.dirname(__file__), 'system_prompts')
-ARCHIVE_DIR = os.path.join(PROMPT_DIR, 'archive')
+SYSTEM_PROMPT_DIR = config.SYSTEM_PROMPT_DIR # Use path from config
+SYSTEM_ARCHIVE_DIR = config.ARCHIVE_DIR # Use path from config
+USER_PROMPT_DIR = "user_prompts"
+USER_ARCHIVE_DIR = os.path.join(USER_PROMPT_DIR, "archive")
 
-# --- Helper function to get rule files ---
+# --- Helper function to get rule files status ---
 def get_rule_files():
-    """Scans the system_prompts directory for rule files."""
-    rule_files = {}
-    
-    # Define patterns for specific important files and language files
+    """Scans system and user prompt directories for rule files and their status."""
+    all_files_status = {}
+
+    # Define base patterns relative to SYSTEM_PROMPT_DIR
     patterns = {
         'global.md': 'Global Rules',
         'stage2_evaluate_template.md': 'Stage 2 Evaluate Template',
         'stage3_refine_template.md': 'Stage 3 Refine Template',
+        config.STAGE4_TEMPLATE_FILE: 'Stage 4 Retranslate Template', # Added Stage 4
         'tg_*.md': 'Language Specific Rules' # Placeholder description
     }
 
-    # Ensure PROMPT_DIR exists
-    if not os.path.isdir(PROMPT_DIR):
-        logger.error(f"Prompt directory not found: {PROMPT_DIR}")
-        return {} # Return empty if directory doesn't exist
+    # Ensure base directories exist
+    if not os.path.isdir(SYSTEM_PROMPT_DIR):
+        logger.error(f"System prompt directory not found: {SYSTEM_PROMPT_DIR}")
+        # Maybe raise an error or return empty with flash?
+        return {}
 
-    # Find files matching patterns
-    for filename_pattern, description in patterns.items():
-        full_pattern = os.path.join(PROMPT_DIR, filename_pattern)
-        found_files = glob.glob(full_pattern)
-        
+    # 1. Scan SYSTEM_PROMPT_DIR for base files
+    system_files = set()
+    for filename_pattern_or_name, description in patterns.items():
+        if '*' in filename_pattern_or_name: # Handle wildcard patterns (like tg_*.md)
+             full_pattern = os.path.join(SYSTEM_PROMPT_DIR, filename_pattern_or_name)
+             found_files = glob.glob(full_pattern)
+        else: # Handle specific filenames
+             file_path = os.path.join(SYSTEM_PROMPT_DIR, filename_pattern_or_name)
+             found_files = [file_path] if os.path.isfile(file_path) else []
+             
         for file_path in found_files:
-            # Make sure we don't list files from the archive directory itself
-            if os.path.dirname(file_path) == PROMPT_DIR:
+            # Ensure it's directly in system_prompts, not archive
+            if os.path.dirname(file_path) == SYSTEM_PROMPT_DIR:
                 base_filename = os.path.basename(file_path)
-                
-                current_description = description # Default description
-                # Try to get a more specific description for language files
-                if filename_pattern == 'tg_*.md':
+                system_files.add(base_filename)
+                # Store initial description based on system file
+                current_description = description
+                if filename_pattern_or_name == 'tg_*.md':
                     lang_code_match = re.match(r"tg_([a-zA-Z]{2}[A-Z]{2})\.md", base_filename)
                     if lang_code_match:
                         lang_code = lang_code_match.group(1)
-                        # Use language map from config if available
                         current_description = f"{config.LANGUAGE_NAME_MAP.get(lang_code, lang_code)} Rules"
-                
-                rule_files[base_filename] = current_description
+                all_files_status[base_filename] = {'description': current_description, 'has_override': False}
             else:
-                 # This case handles specific files like 'global.md'
-                 # If a file like global.md was expected but not found, log it
-                 if '*' not in filename_pattern and not os.path.isfile(file_path):
-                     logger.warning(f"Expected rule file not found: {file_path}")
+                # This case might catch the specific files if path wasn't directly in SYSTEM_PROMPT_DIR
+                if not '*' in filename_pattern_or_name and not os.path.isfile(file_path):
+                     logger.warning(f"Expected specific rule file not found: {file_path}")
+
+    # 2. Scan USER_PROMPT_DIR for overrides
+    if os.path.isdir(USER_PROMPT_DIR):
+        user_files = set()
+        pattern = os.path.join(USER_PROMPT_DIR, '*.md') # Look for any .md file
+        found_files = glob.glob(pattern)
+        for file_path in found_files:
+             # Ensure it's directly in user_prompts, not archive
+             if os.path.dirname(file_path) == USER_PROMPT_DIR:
+                 base_filename = os.path.basename(file_path)
+                 user_files.add(base_filename)
+                 # If this file also exists in system, mark as override
+                 if base_filename in all_files_status:
+                     all_files_status[base_filename]['has_override'] = True
+                 # If it only exists in user_prompts (maybe orphaned?), add it?
+                 # For now, only show overrides for files that have a system base.
+                 # else: 
+                 #    all_files_status[base_filename] = {'description': f"User Only: {base_filename}", 'has_override': True} 
+    else:
+        # If user_prompts doesn't exist, no overrides are possible yet
+        logger.info(f"User prompts directory not found: {USER_PROMPT_DIR}. No overrides loaded.")
+        pass
 
     # Sort rules for consistent display: global, stages, then languages alphabetically
     sorted_rule_files = {}
     # Add specific files in desired order
-    for fname in ['global.md', 'stage2_evaluate_template.md', 'stage3_refine_template.md']:
-        if fname in rule_files:
-            sorted_rule_files[fname] = rule_files.pop(fname)
-            
+    # Use os.path.basename for keys derived from config paths
+    order = [
+        os.path.basename(config.GLOBAL_RULES_FILE),
+        os.path.basename(config.STAGE2_TEMPLATE_FILE),
+        os.path.basename(config.STAGE3_TEMPLATE_FILE),
+        os.path.basename(config.STAGE4_TEMPLATE_FILE) 
+    ]
+    for fname in order:
+        if fname in all_files_status:
+            sorted_rule_files[fname] = all_files_status.pop(fname)
+
     # Add remaining language files sorted alphabetically
-    for fname in sorted(rule_files.keys()):
-         sorted_rule_files[fname] = rule_files[fname]
+    for fname in sorted(all_files_status.keys()):
+         if fname.startswith('tg_'): # Ensure we only add language files here
+             sorted_rule_files[fname] = all_files_status[fname]
+         # Add any other non-standard files found at the end? Or ignore?
+         # else: 
+         #    sorted_rule_files[fname] = all_files_status[fname]
 
     return sorted_rule_files
 
@@ -97,7 +137,9 @@ def create_app():
     # Ensure necessary directories exist
     os.makedirs(config.OUTPUT_DIR, exist_ok=True)
     # os.makedirs(config.INPUT_CSV_DIR, exist_ok=True) # Removed, using temp_uploads instead
-    os.makedirs(ARCHIVE_DIR, exist_ok=True) # Use constant
+    # os.makedirs(ARCHIVE_DIR, exist_ok=True) # Use constant - System archive handled via config?
+    # Let's explicitly ensure User archive dir exists on startup too
+    os.makedirs(USER_ARCHIVE_DIR, exist_ok=True)
     db_manager.initialize_database(config.DATABASE_FILE)
     prompt_manager.load_prompts()
 
@@ -500,27 +542,38 @@ def create_app():
             # Use approved_translation if available and not empty, otherwise use LLM final
             current_translation = task_info['approved_translation'] or task_info['final_translation'] or ""
             
-            # 2. Construct re-translate prompt
-            # Load template (requires prompt_manager update)
-            retranslate_prompt_template = prompt_manager.load_single_prompt_file(config.STAGE4_TEMPLATE_FILE) # Need STAGE4 path in config
-            if not retranslate_prompt_template:
-                 return jsonify({"error": "Retranslate prompt template not found"}), 500
-                 
-            # Get full ruleset
-            lang_specific_part = prompt_manager.stage1_templates.get(lang_code)
-            if not lang_specific_part: raise ValueError(f"Lang specific prompt for {lang_code} missing")
-            lang_name = config.LANGUAGE_NAME_MAP.get(lang_code, lang_code)
-            lang_specific_part = lang_specific_part.replace("<<TARGET_LANGUAGE_NAME>>", lang_name)
-            full_ruleset_prompt = f"{lang_specific_part}\n\n{prompt_manager.global_rules_content}"
-            
-            final_instruction = "\n\n**IMPORTANT FINAL INSTRUCTION:..." # Add instruction
+            # 2. Construct re-translate prompt (using prompt_manager which handles overrides)
+            try:
+                # Re-use get_full_prompt logic if suitable, or adapt Stage 4 logic here
+                # For now, let's assume a dedicated Stage 4 template loading
+                stage4_template = prompt_manager.load_single_prompt_file(config.STAGE4_TEMPLATE_FILE)
+                if not stage4_template:
+                    raise ValueError("Stage 4 (Retranslate) template not found or failed to load.")
+                
+                # Need full ruleset for the language
+                global_rules = prompt_manager.global_rules_content # Already loaded (hopefully)
+                lang_template = prompt_manager.stage1_templates.get(lang_code) # Already loaded
+                if not lang_template:
+                    raise ValueError(f"Stage 1 template for language {lang_code} not loaded.")
+                if not global_rules:
+                     raise ValueError("Global rules not loaded.")
+                     
+                lang_name = config.LANGUAGE_NAME_MAP.get(lang_code, lang_code)
+                lang_template = lang_template.replace("<<TARGET_LANGUAGE_NAME>>", lang_name)
+                full_ruleset = f"{lang_template}\n\n{global_rules}"
 
-            system_prompt = retranslate_prompt_template.replace("<<TARGET_LANGUAGE_NAME>>", lang_name)\
-                                                       .replace("<<RULES>>", full_ruleset_prompt)\
-                                                       .replace("<<SOURCE_TEXT>>", source_text or "")\
-                                                       .replace("<<CURRENT_TRANSLATION>>", current_translation)\
-                                                       .replace("<<REFINEMENT_INSTRUCTION>>", refinement_instruction)
-            system_prompt += final_instruction
+                final_instruction = "\n\n**IMPORTANT FINAL INSTRUCTION:..." # Add final instruction consistent with prompt_manager
+
+                system_prompt = stage4_template.replace("<<TARGET_LANGUAGE_NAME>>", lang_name)\
+                                               .replace("<<RULES>>", full_ruleset)\
+                                               .replace("<<SOURCE_TEXT>>", source_text or "")\
+                                               .replace("<<CURRENT_TRANSLATION>>", current_translation)\
+                                               .replace("<<REFINEMENT_INSTRUCTION>>", refinement_instruction)
+                system_prompt += final_instruction
+                
+            except Exception as prompt_e:
+                 logger.exception(f"Error constructing re-translate prompt for task {task_id}: {prompt_e}")
+                 return jsonify({"error": f"Failed to build re-translate prompt: {prompt_e}"}), 500
 
             # 3. Determine API/Model (Use batch defaults for now)
             batch_info = db_manager.get_batch_info(db_path, task_info['batch_id'])
@@ -529,20 +582,30 @@ def create_app():
             if batch_info and batch_info['config_details']:
                 try:
                     batch_config = json.loads(batch_info['config_details'])
-                    # Use S3 API/Model config from batch if available? Or S1? Let's use S1 for re-translate.
+                    # Use S1 API/Model config from batch for re-translate?
                     api_to_use = batch_config.get('s1_api', config.DEFAULT_API)
                     model_to_use = batch_config.get('s1_model')
                 except Exception:
                     logger.warning(f"Could not parse batch config for retranslate API selection, using defaults.")
 
             # 4. Call API
-            openai_client_obj = api_clients.get_openai_client() # Get client if needed
+            # Get necessary API clients (handle potential missing keys) - REMOVED this logic as call_active_api handles it
+            # api_clients_dict = {} 
+            # try:
+            #      if 'openai' in api_to_use.lower(): api_clients_dict['openai'] = api_clients.get_openai_client()
+            #      if 'gemini' in api_to_use.lower(): api_clients_dict['gemini'] = api_clients.get_gemini_client()
+            #      if 'perplexity' in api_to_use.lower(): api_clients_dict['perplexity'] = api_clients.get_perplexity_client()
+            # except Exception as client_e:
+            #      logger.error(f\"Failed to initialize API client for {api_to_use}: {client_e}\")
+            #      return jsonify({\"error\": f\"API client setup failed: {client_e}\"}), 500
+                 
             new_translation = translation_service.call_active_api(
-                api_to_use, system_prompt, 
+                api_to_use,
+                system_prompt,
                 "Apply the refinement instruction.", # Simple user content
-                row_identifier=f"{task_id}-RETRANSLATE", 
-                model_override=model_to_use,
-                openai_client_obj=openai_client_obj
+                row_identifier=f"{task_id}-RETRANSLATE",
+                model_override=model_to_use
+                # **api_clients_dict # Pass initialized clients - REMOVED
             )
 
             # 5. Update DB and respond
@@ -558,7 +621,7 @@ def create_app():
         except Exception as e:
             logger.exception(f"Error retranslating task {task_id}: {e}")
             return jsonify({"error": "An internal error occurred during re-translation."}), 500
-
+            
     # --- Batch History Route --- #
     @app.route('/history')
     def batch_history():
@@ -581,114 +644,227 @@ def create_app():
     # --- Rules Routes --- 
     @app.route('/rules')
     def list_rules():
-        """Displays a list of available rule files."""
+        """Displays a list of available rule files and their override status."""
         logger.info("Received request for /rules")
         try:
-            rules = get_rule_files()
-            return render_template('rules_list.html', rules=rules)
+            rules_status = get_rule_files() # Now returns status dict
+            return render_template('rules_list.html', rules_status=rules_status)
         except Exception as e:
             logger.exception("Error getting rule files list.")
             flash(f'Error loading rules list: {e}', 'danger')
-            return render_template('rules_list.html', rules={}) # Pass empty dict on error
+            return render_template('rules_list.html', rules_status={}) # Pass empty dict on error
             
     @app.route('/rules/view/<path:filename>')
     def view_rule(filename):
-        """Displays the content of a specific rule file."""
-        logger.info(f"Received request to view rule: {filename}")
-        # Security: Prevent accessing files outside the PROMPT_DIR
-        target_file_path = os.path.abspath(os.path.join(PROMPT_DIR, filename))
-        if not target_file_path.startswith(os.path.abspath(PROMPT_DIR)):
-            logger.warning(f"Attempt to access file outside prompt directory: {filename}")
-            flash("Invalid file path.", "danger")
-            return redirect(url_for('list_rules'))
+        """Displays the effective content (user override or system base) of a rule file."""
+        logger.info(f"Received request to view effective rule: {filename}")
 
+        system_file_path = os.path.abspath(os.path.join(SYSTEM_PROMPT_DIR, filename))
+        user_file_path = os.path.abspath(os.path.join(USER_PROMPT_DIR, filename))
+        
+        # Basic security check: Ensure the filename doesn't try to escape intended dirs
+        if '..' in filename or filename.startswith('/'):
+             logger.warning(f"Potentially insecure filename detected: {filename}")
+             flash("Invalid filename.", "danger")
+             return redirect(url_for('list_rules'))
+
+        content = None
+        status = "Not Found" # e.g., Base Only, Override Exists, User Only (if implemented), Not Found
+        effective_path_type = None # 'user' or 'system'
+
+        # Check user override first
+        # Ensure user path is within the project's USER_PROMPT_DIR
+        if os.path.exists(user_file_path) and user_file_path.startswith(os.path.abspath(USER_PROMPT_DIR)):
+            try:
+                with open(user_file_path, 'r', encoding='utf-8') as f:
+                    content = f.read()
+                status = "User Override" 
+                effective_path_type = 'user'
+                logger.info(f"Displaying user override for {filename}")
+            except Exception as e:
+                logger.exception(f"Error reading user override file {user_file_path}: {e}")
+                flash(f"Error reading user override for '{filename}': {e}", "danger")
+                return redirect(url_for('list_rules'))
+        # Then check system base
+        # Ensure system path is within the project's SYSTEM_PROMPT_DIR
+        elif os.path.exists(system_file_path) and system_file_path.startswith(os.path.abspath(SYSTEM_PROMPT_DIR)):
+             try:
+                with open(system_file_path, 'r', encoding='utf-8') as f:
+                    content = f.read()
+                status = "System Base" 
+                effective_path_type = 'system'
+                logger.info(f"Displaying system base for {filename}")
+             except Exception as e:
+                logger.exception(f"Error reading system base file {system_file_path}: {e}")
+                flash(f"Error reading system base file '{filename}': {e}", "danger")
+                return redirect(url_for('list_rules'))
+        # If neither exists (or path is invalid)
+        else:
+             logger.warning(f"Rule file '{filename}' not found in system or user directories, or invalid path.")
+             flash(f"Rule file '{filename}' not found.", "warning")
+             return redirect(url_for('list_rules'))
+
+        # Get description (based on filename, could be refined)
+        all_rules_status = get_rule_files()
+        description = all_rules_status.get(filename, {}).get('description', filename)
+        # Determine if a base version actually exists for linking purposes
+        has_base_file = os.path.exists(system_file_path) and system_file_path.startswith(os.path.abspath(SYSTEM_PROMPT_DIR))
+
+        return render_template('rules_view.html',
+                               filename=filename,
+                               description=description,
+                               content=content,
+                               status=status, # Pass 'User Override' or 'System Base'
+                               has_base_file=has_base_file) # Indicate if system base exists
+
+    @app.route('/rules/view_base/<path:filename>')
+    def view_base_rule(filename):
+        """Explicitly displays the system base version of a rule file."""
+        logger.info(f"Received request to view BASE rule: {filename}")
+        system_file_path = os.path.abspath(os.path.join(SYSTEM_PROMPT_DIR, filename))
+        
+        # Security check
+        if '..' in filename or filename.startswith('/') or not system_file_path.startswith(os.path.abspath(SYSTEM_PROMPT_DIR)):
+             logger.warning(f"Attempt to access invalid base file path: {filename}")
+             flash("Invalid file path for base rule.", "danger")
+             return redirect(url_for('list_rules'))
+             
+        content = None
+        status = "System Base"
         try:
-            with open(target_file_path, 'r', encoding='utf-8') as f:
-                content = f.read()
-            # Get the friendly description for the title
-            all_rules = get_rule_files() # Reuse helper to get descriptions
-            description = all_rules.get(filename, filename) # Default to filename if not found
-            return render_template('rules_view.html', filename=filename, description=description, content=content)
-        except FileNotFoundError:
-            logger.error(f"Rule file not found: {target_file_path}")
-            flash(f"Rule file '{filename}' not found.", "warning")
-            return redirect(url_for('list_rules'))
+            if os.path.exists(system_file_path):
+                 with open(system_file_path, 'r', encoding='utf-8') as f:
+                     content = f.read()
+            else:
+                 flash(f"System base file '{filename}' not found.", "warning")
+                 return redirect(url_for('list_rules'))
         except Exception as e:
-            logger.exception(f"Error reading rule file {filename}: {e}")
-            flash(f"Error reading rule file '{filename}': {e}", "danger")
-            return redirect(url_for('list_rules'))
+             logger.exception(f"Error reading system base file {system_file_path} for view_base: {e}")
+             flash(f"Error reading system base file '{filename}': {e}", "danger")
+             return redirect(url_for('list_rules'))
+             
+        all_rules_status = get_rule_files()
+        description = all_rules_status.get(filename, {}).get('description', filename)
+        # Indicate this is the base view and that editing is not directly possible from here
+        return render_template('rules_view.html',
+                               filename=filename,
+                               description=f"{description} (Base Version)",
+                               content=content,
+                               status=status, 
+                               is_base_view=True) # Flag for template logic
+
 
     @app.route('/rules/edit/<path:filename>', methods=['GET', 'POST'])
     def edit_rule(filename):
-        """Handles viewing the edit form and saving changes to a rule file."""
+        """Handles viewing the edit form (loads effective version) and saving changes (always to user_prompts/)."""
         logger.info(f"Received request to edit rule: {filename} (Method: {request.method})")
-        
-        # --- Security Check & Path Setup --- 
-        target_file_path = os.path.abspath(os.path.join(PROMPT_DIR, filename))
-        if not target_file_path.startswith(os.path.abspath(PROMPT_DIR)):
-            logger.warning(f"Attempt to access file outside prompt directory for editing: {filename}")
-            flash("Invalid file path.", "danger")
-            return redirect(url_for('list_rules'))
-            
-        # Ensure the prompt directory exists (should always, but belt-and-suspenders)
-        if not os.path.isdir(PROMPT_DIR):
-             logger.error(f"Prompt directory {PROMPT_DIR} not found during edit.")
-             flash("Configuration error: Prompt directory not found.", "danger")
+
+        system_file_path = os.path.abspath(os.path.join(SYSTEM_PROMPT_DIR, filename))
+        user_file_path = os.path.abspath(os.path.join(USER_PROMPT_DIR, filename))
+        target_save_path = user_file_path # Always save edits to the user directory
+        target_archive_dir = USER_ARCHIVE_DIR
+
+        # Basic security check on filename itself might be good?
+        if '..' in filename or filename.startswith('/'):
+             logger.warning(f"Potentially insecure filename detected for edit: {filename}")
+             flash("Invalid filename.", "danger")
              return redirect(url_for('list_rules'))
-             
-        # --- Handle POST Request (Saving Changes) --- 
+
+        # Ensure save directory is within project bounds
+        if not target_save_path.startswith(os.path.abspath(USER_PROMPT_DIR)):
+            logger.error(f"Invalid save path generated for edit: {target_save_path}")
+            flash("Error: Invalid target file path for saving.", "danger")
+            return redirect(url_for('list_rules'))
+
+        # --- Handle POST Request (Saving Changes to user_prompts/) --- 
         if request.method == 'POST':
             try:
                 edited_content = request.form.get('edited_content')
                 if edited_content is None: # Check if the form field exists
                     raise ValueError("Form data missing 'edited_content'.")
 
-                # 1. Archive the current version
-                archive_filename = f"{filename}_{datetime.now().strftime('%Y%m%d%H%M%S')}.md"
-                archive_file_path = os.path.join(ARCHIVE_DIR, archive_filename)
-                os.makedirs(ARCHIVE_DIR, exist_ok=True) # Ensure archive dir exists
-                
-                if os.path.exists(target_file_path):
-                    with open(target_file_path, 'r', encoding='utf-8') as current_file, \
-                         open(archive_file_path, 'w', encoding='utf-8') as archive_file:
-                        archive_file.write(current_file.read())
-                    logger.info(f"Archived current version of {filename} to {archive_filename}")
+                # Ensure target directories exist
+                os.makedirs(USER_PROMPT_DIR, exist_ok=True)
+                os.makedirs(target_archive_dir, exist_ok=True)
+
+                # 1. Archive the *current user version* if it exists
+                if os.path.exists(target_save_path):
+                    archive_filename = f"{filename}_{datetime.now().strftime('%Y%m%d%H%M%S')}.md"
+                    archive_file_path = os.path.join(target_archive_dir, archive_filename)
+                    try:
+                        # Use os.replace for atomicity if possible? Or stick to read/write
+                        # os.rename might be better than read/write for archiving
+                        # shutil.copy2(target_save_path, archive_file_path)
+                        with open(target_save_path, 'r', encoding='utf-8') as current_file, \
+                             open(archive_file_path, 'w', encoding='utf-8') as archive_file:
+                             archive_file.write(current_file.read())
+                        logger.info(f"Archived current user version of {filename} to {archive_filename} in {target_archive_dir}")
+                    except Exception as archive_e:
+                         # Log archive error but proceed with saving the main file
+                         logger.error(f"Failed to archive {target_save_path}: {archive_e}")
+                         flash(f"Warning: Could not archive previous version of {filename}. Proceeding with save.", "warning")
                 else:
-                    logger.warning(f"Original file {filename} not found for archiving during save.")
+                    logger.info(f"No existing user file at {target_save_path} to archive. Saving new user override.")
 
-                # 2. Save the new content
-                with open(target_file_path, 'w', encoding='utf-8') as f:
+                # 2. Save the new content to the user file
+                with open(target_save_path, 'w', encoding='utf-8') as f:
                     f.write(edited_content)
-                logger.info(f"Successfully saved changes to {filename}")
-                flash(f"Rule file '{filename}' saved successfully.", "success")
-                return redirect(url_for('view_rule', filename=filename)) # Redirect back to view
+                logger.info(f"Successfully saved user override changes to {target_save_path}")
+                flash(f"User override for '{filename}' saved successfully.", "success")
+                return redirect(url_for('view_rule', filename=filename)) # Redirect back to view (will show override)
 
             except Exception as e:
-                logger.exception(f"Error saving rule file {filename}: {e}")
-                flash(f"Error saving rule file '{filename}': {e}", "danger")
-                # Stay on the edit page if save fails, passing back the attempted content
-                # Need to get description again for the template title
-                all_rules = get_rule_files()
-                description = all_rules.get(filename, filename)
-                # Pass the content the user tried to save back to the template
-                return render_template('rules_edit.html', filename=filename, description=description, content=edited_content), 500 
+                logger.exception(f"Error saving user override file {filename}: {e}")
+                flash(f"Error saving user override file '{filename}': {e}", "danger")
+                # Stay on edit page, reload description
+                all_rules_status = get_rule_files()
+                description = all_rules_status.get(filename, {}).get('description', filename)
+                # Pass back the attempted content and indicate if it was the first edit attempt
+                return render_template('rules_edit.html', filename=filename, description=description, content=edited_content, is_editing_base=(not os.path.exists(user_file_path))), 500 # Pass back is_editing_base status
 
-        # --- Handle GET Request (Show Edit Form) --- 
+        # --- Handle GET Request (Show Edit Form with effective content) --- 
         else: # request.method == 'GET'
-            try:
-                with open(target_file_path, 'r', encoding='utf-8') as f:
-                    content = f.read()
-                all_rules = get_rule_files()
-                description = all_rules.get(filename, filename)
-                return render_template('rules_edit.html', filename=filename, description=description, content=content)
-            except FileNotFoundError:
-                logger.error(f"Rule file not found for editing: {target_file_path}")
-                flash(f"Rule file '{filename}' not found.", "warning")
-                return redirect(url_for('list_rules'))
-            except Exception as e:
-                logger.exception(f"Error reading rule file {filename} for editing: {e}")
-                flash(f"Error reading rule file '{filename}' for editing: {e}", "danger")
-                return redirect(url_for('list_rules'))
+            content_to_edit = None
+            is_editing_base = False # Flag to tell template if loading from system initially
+            effective_path_type = None # 'user' or 'system'
+
+            # Check user override first
+            if os.path.exists(user_file_path) and user_file_path.startswith(os.path.abspath(USER_PROMPT_DIR)):
+                 try:
+                     with open(user_file_path, 'r', encoding='utf-8') as f:
+                         content_to_edit = f.read()
+                     effective_path_type = 'user'
+                     logger.info(f"Editing user override for {filename}")
+                 except Exception as e:
+                     logger.exception(f"Error reading user override file {user_file_path} for editing: {e}")
+                     flash(f"Error reading user override for '{filename}': {e}", "danger")
+                     return redirect(url_for('list_rules'))
+            # Then check system base if no user override
+            elif os.path.exists(system_file_path) and system_file_path.startswith(os.path.abspath(SYSTEM_PROMPT_DIR)):
+                 try:
+                     with open(system_file_path, 'r', encoding='utf-8') as f:
+                         content_to_edit = f.read()
+                     effective_path_type = 'system'
+                     is_editing_base = True # Mark that we loaded from system
+                     logger.info(f"Editing system base for {filename} (will save to user_prompts)")
+                 except Exception as e:
+                     logger.exception(f"Error reading system base file {system_file_path} for editing: {e}")
+                     flash(f"Error reading system base file '{filename}': {e}", "danger")
+                     return redirect(url_for('list_rules'))
+            # If neither exists
+            else:
+                 logger.warning(f"Rule file '{filename}' not found in system or user directories for editing.")
+                 flash(f"Rule file '{filename}' not found.", "warning")
+                 return redirect(url_for('list_rules'))
+
+            all_rules_status = get_rule_files()
+            description = all_rules_status.get(filename, {}).get('description', filename)
+
+            return render_template('rules_edit.html',
+                                   filename=filename,
+                                   description=description,
+                                   content=content_to_edit,
+                                   is_editing_base=is_editing_base) # Pass flag to template
     # --- End Rules Routes ---
 
     @app.route('/placeholder') # Keep or remove this placeholder?

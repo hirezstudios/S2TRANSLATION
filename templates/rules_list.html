@@ -17,21 +17,29 @@
       {% endif %}
     {% endwith %}
 
-    {% if rules %}
+    {% if rules_status %}
         <div class="list-group">
-            {% for filename, description in rules.items() %}
+            {% for filename, status_info in rules_status.items() %}
                 <div class="list-group-item list-group-item-action d-flex justify-content-between align-items-center">
                     <div>
-                        <h5 class="mb-1">{{ description }}</h5>
+                        <h5 class="mb-1">
+                            {{ status_info.description }}
+                            {% if status_info.has_override %}
+                                <span class="badge bg-info ms-2">User Edited</span>
+                            {% endif %}
+                        </h5>
                         <small class="text-muted">{{ filename }}</small>
                     </div>
-                    <a href="{{ url_for('view_rule', filename=filename) }}" class="btn btn-sm btn-outline-primary">View Rule</a>
+                    <div> {# Container for buttons #}
+                        <a href="{{ url_for('view_rule', filename=filename) }}" class="btn btn-sm btn-outline-primary me-2">View Effective</a>
+                        <a href="{{ url_for('edit_rule', filename=filename) }}" class="btn btn-sm btn-primary">Edit</a>
+                    </div>
                 </div>
             {% endfor %}
         </div>
     {% else %}
         <div class="alert alert-warning" role="alert">
-            No rule files found in the `system_prompts` directory or an error occurred loading them.
+            No rule files found or an error occurred loading them.
         </div>
     {% endif %}
 

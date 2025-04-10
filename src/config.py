@@ -64,8 +64,9 @@ API_MAX_RETRY_DELAY = float(API_MAX_RETRY_DELAY_STR.split('#')[0].strip())
 THREAD_STAGGER_DELAY_STR = os.getenv("THREAD_STAGGER_DELAY", "1.0") 
 THREAD_STAGGER_DELAY = float(THREAD_STAGGER_DELAY_STR.split('#')[0].strip())
 
-# --- Rules Archiving ---
-ARCHIVE_DIR = os.getenv("ARCHIVE_DIR", "system_prompts/archive/").split('#')[0].strip().strip('"').strip("'")
+# --- Prompt/Rules Directories ---
+SYSTEM_PROMPT_DIR = os.getenv("SYSTEM_PROMPT_DIR", "system_prompts").split('#')[0].strip().strip('"').strip("'")
+ARCHIVE_DIR = os.getenv("ARCHIVE_DIR", os.path.join(SYSTEM_PROMPT_DIR, "archive")).split('#')[0].strip().strip('"').strip("'")
 
 # --- Validation ---
 VALID_APIS = ["PERPLEXITY", "OPENAI", "GEMINI"]
@@ -85,6 +86,7 @@ for api in all_apis:
 # Ensure output/archive directories exist
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 os.makedirs(os.path.dirname(DATABASE_FILE), exist_ok=True) # Ensure DB directory exists
+os.makedirs(SYSTEM_PROMPT_DIR, exist_ok=True) # Ensure system prompt dir exists
 os.makedirs(ARCHIVE_DIR, exist_ok=True)
 
 print("Config loaded.") 

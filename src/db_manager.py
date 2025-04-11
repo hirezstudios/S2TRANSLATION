@@ -75,7 +75,9 @@ def initialize_database(db_file_path):
             'review_timestamp': 'DATETIME',
             'edit_history': 'TEXT',
             'stage0_glossary': 'TEXT',
-            'stage0_raw_output': 'TEXT'
+            'stage0_raw_output': 'TEXT',
+            'stage0_status': 'TEXT',
+            'initial_target_text': 'TEXT'
         }
 
         base_create_sql = """
@@ -100,6 +102,8 @@ def initialize_database(db_file_path):
                 edit_history TEXT,
                 stage0_glossary TEXT,
                 stage0_raw_output TEXT,
+                stage0_status TEXT,
+                initial_target_text TEXT,
                 FOREIGN KEY (batch_id) REFERENCES Batches (batch_id) ON DELETE CASCADE
             )
         """
@@ -186,16 +190,15 @@ def add_batch(db_file_path, batch_id, filename, config_json):
     finally:
         conn.close()
 
-def add_translation_task(db_file_path, batch_id, row_index, lang_code, source_text, metadata_json):
+def add_translation_task(db_file_path, batch_id, row_index, lang_code, source_text, metadata_json, initial_target_text=None):
     conn = get_db_connection(db_file_path)
     try:
-        logger.debug(f"DB_MANAGER: Adding task for Batch {batch_id}, Row {row_index}, Lang {lang_code}. Received metadata_json: {metadata_json}")
-        # --- End Debug Log --- #
+        logger.debug(f"DB_MANAGER: Adding task for Batch {batch_id}, Row {row_index}, Lang {lang_code}. Received metadata_json: {metadata_json}, initial_target: {initial_target_text}")
         conn.execute("""
             INSERT INTO TranslationTasks 
-            (batch_id, row_index_in_file, language_code, source_text, metadata_json, status)
-            VALUES (?, ?, ?, ?, ?, ?) 
-        """, (batch_id, row_index, lang_code, source_text, metadata_json, 'pending')) 
+            (batch_id, row_index_in_file, language_code, source_text, metadata_json, initial_target_text, status)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        """, (batch_id, row_index, lang_code, source_text, metadata_json, initial_target_text, 'pending'))
         conn.commit()
     except sqlite3.Error as e:
         logger.error(f"Failed to add task for batch {batch_id}, row {row_index}, lang {lang_code}: {e}")
@@ -230,7 +233,8 @@ def update_task_results(db_file_path, task_id, status,
                           final_tx=None, approved_tx=None, review_sts=None,
                           error_msg=None,
                           stage0_glossary=None,
-                          stage0_raw_output=None):
+                          stage0_raw_output=None,
+                          stage0_status=None):
     """Updates task results, status, and optionally review status/approved text and Stage 0 results."""
     conn = get_db_connection(db_file_path)
     try:
@@ -273,6 +277,9 @@ def update_task_results(db_file_path, task_id, status,
         if stage0_raw_output is not None:
             set_clauses.append("stage0_raw_output = ?")
             params.append(stage0_raw_output)
+        if stage0_status is not None:
+            set_clauses.append("stage0_status = ?")
+            params.append(stage0_status)
         # <<<<<<<<<<<<<<<<<<<<<<<<<<<
             
         # Always update error message (could be None to clear it)
@@ -824,6 +831,29 @@ def get_tasks_for_stages_report(db_path: str, batch_id: str) -> List[Dict]:
     finally:
         if conn:
             conn.close()
+
+# <<< ADD NEW FUNCTION: count_tasks_with_stage0_status >>>
+def count_tasks_with_stage0_status(db_path: str, batch_id: str, stage0_status: str) -> int:
+    """Counts tasks in a batch with a specific stage0_status."""
+    conn = get_db_connection(db_path)
+    count = 0
+    try:
+        cursor = conn.execute(""" 
+            SELECT COUNT(*) FROM TranslationTasks 
+            WHERE batch_id = ? AND stage0_status = ?
+            """, (batch_id, stage0_status))
+        result = cursor.fetchone()
+        if result:
+            count = result[0]
+        logger.debug(f"Counted {count} tasks for batch {batch_id} with stage0_status '{stage0_status}'.")
+    except sqlite3.Error as e:
+        logger.error(f"Failed to count tasks for batch {batch_id} with stage0_status '{stage0_status}': {e}")
+        count = 0 # Return 0 on error
+    finally:
+        if conn:
+            conn.close()
+    return count
+# <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
 
 # Allow running initialization directly (needs path argument)
 if __name__ == '__main__':

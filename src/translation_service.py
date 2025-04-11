@@ -560,6 +560,7 @@ def translate_row_worker(task_id, batch_id, row_index, lang_code, source_text, w
     batch_prompt = worker_config['batch_prompt']
     use_vs = worker_config['use_vs']
     openai_client_obj = worker_config['openai_client']
+    update_strategy = worker_config['update_strategy']
 
     # --- Initialize State --- 
     db_manager.update_task_status(db_path, task_id, 'running')
@@ -574,6 +575,7 @@ def translate_row_worker(task_id, batch_id, row_index, lang_code, source_text, w
     final_status = 'error' 
     generated_glossary = None
     stage0_raw = None
+    stage0_status = None
     target_openai_vs_id = None
 
     # --- Vector Store Setup --- 
@@ -601,6 +603,48 @@ def translate_row_worker(task_id, batch_id, row_index, lang_code, source_text, w
         "mode": translation_mode,
         "vs_used_overall": bool(target_openai_vs_id)
     }
+
+    # --- Get necessary data from DB for this specific task ---
+    task_details = None
+    try:
+        conn_task = db_manager.get_db_connection(db_path)
+        cursor_task = conn_task.cursor()
+        cursor_task.execute("SELECT initial_target_text FROM TranslationTasks WHERE task_id = ?", (task_id,))
+        task_details = cursor_task.fetchone()
+        conn_task.close()
+    except Exception as db_err:
+        logger.error(f"WORKER [{task_id} / {row_identifier}]: Failed to retrieve task details from DB: {db_err}", exc_info=True)
+        # Fail the task if we can't get its details
+        db_manager.update_task_results(db_path, task_id, 'failed', error_msg=f"DB Error: {db_err}")
+        return False, None
+
+    if not task_details:
+        logger.error(f"WORKER [{task_id} / {row_identifier}]: Task details not found in DB (task_id: {task_id})")
+        # Status might already be updated by DB function, but ensure consistency
+        db_manager.update_task_results(db_path, task_id, 'failed', error_msg="Task details not found")
+        return False, None
+
+    initial_target_text_db = task_details['initial_target_text']
+    # --- End DB Data Retrieval ---
+    
+    # --- Determine if Minimal Change Mode should be applied ---
+    apply_minimal_change = False
+    minimal_change_context = None
+    if update_strategy == 'update_existing' and initial_target_text_db and initial_target_text_db.strip():
+        apply_minimal_change = True
+        minimal_change_context = {
+            "existing_target_text": initial_target_text_db,
+            "new_english_source": source_text # The source_text passed to worker is the new one
+        }
+        logger.info(f"WORKER [{task_id} / {row_identifier}]: Applying MINIMAL CHANGE strategy.")
+        # Add strategy used to audit base
+        audit_record_base["update_strategy_applied"] = "minimal_change"
+    else:
+        # Log why minimal change wasn't applied if strategy was set
+        if update_strategy == 'update_existing':
+             logger.info(f"WORKER [{task_id} / {row_identifier}]: Minimal change strategy selected, but no existing target text found. Using retranslate.")
+        audit_record_base["update_strategy_applied"] = "retranslate"
+    # --- End Mode Determination ---
 
     if not source_text:
         logger.warning(f"WORKER [{task_id} / {row_identifier}]: Source text empty. Completing task.")
@@ -634,7 +678,8 @@ def translate_row_worker(task_id, batch_id, row_index, lang_code, source_text, w
                     stage0_combined_prompt = prompt_manager.get_full_prompt(
                         prompt_type="0", 
                         language_code=lang_code,
-                        batch_prompt=batch_prompt
+                        batch_prompt=batch_prompt,
+                        minimal_change_context=None # Stage 0 ignores this
                     ) 
                     if not stage0_combined_prompt:
                         raise ValueError("Could not generate Stage 0 prompt.")
@@ -654,17 +699,20 @@ def translate_row_worker(task_id, batch_id, row_index, lang_code, source_text, w
                     if stage0_raw and not stage0_raw.startswith("ERROR:"):
                         generated_glossary = stage0_raw.strip()
                         logger.info(f"WORKER [{task_id} / {row_identifier}]: Stage 0 generated glossary (length: {len(generated_glossary)}).")
+                        stage0_status = 'completed'
                     else:
                         logger.warning(f"WORKER [{task_id} / {row_identifier}]: Stage 0 API call failed or returned empty. Storing raw output/error. Proceeding without glossary.")
                         generated_glossary = None 
+                        stage0_status = 'failed'
 
                 except Exception as s0_err:
                     logger.error(f"WORKER [{task_id} / {row_identifier}]: Error during Stage 0: {s0_err}", exc_info=True)
                     generated_glossary = None 
                     stage0_raw = str(s0_err)[:500] 
+                    stage0_status = 'failed'
             else:
                  logger.warning(f"WORKER [{task_id} / {row_identifier}]: Skipping Stage 0: No active VS ID for {lang_code}.")
-                 # generated_glossary and stage0_raw remain None
+                 stage0_status = 'skipped_no_vs'
         # <<< --- END STAGE 0 --- >>>
 
         # --- Get Stage 1 Prompt (Common for all modes, uses glossary if generated) ---
@@ -672,7 +720,8 @@ def translate_row_worker(task_id, batch_id, row_index, lang_code, source_text, w
             prompt_type="1", 
             language_code=lang_code,
             batch_prompt=batch_prompt,
-            generated_glossary=generated_glossary
+            generated_glossary=generated_glossary,
+            minimal_change_context=minimal_change_context if apply_minimal_change else None # <<< PASS CONTEXT >>>
         )
         if not stage1_prompt:
             raise ValueError(f"Could not generate Stage 1 prompt for {lang_code}")
@@ -689,7 +738,11 @@ def translate_row_worker(task_id, batch_id, row_index, lang_code, source_text, w
                  logger.info(f"WORKER [{task_id} / {row_identifier}]: Using VS ID {vs_id_for_call} for ONE_STAGE OpenAI call.")
             
             audit_record = {**audit_record_base, "api": api_to_use, "model": model_to_use or "default"} 
-            logger.debug(f"WORKER [{task_id} / {row_identifier}]: Calling API (One Stage) - API: {api_to_use}, Model: {model_to_use or 'default'}, VS_ID: {vs_id_for_call}") 
+            # Add minimal change context info to audit if applied
+            if apply_minimal_change and minimal_change_context:
+                audit_record["existing_target_preview"] = minimal_change_context['existing_target_text'][:50] + "..." 
+
+            logger.debug(f"WORKER [{task_id} / {row_identifier}]: Calling API (One Stage) - API: {api_to_use}, Model: {model_to_use or 'default'}, VS_ID: {vs_id_for_call}, MinimalChange: {apply_minimal_change}") 
             final_translation_local = call_active_api(
                 api_to_use, 
                 stage1_prompt, 
@@ -725,7 +778,11 @@ def translate_row_worker(task_id, batch_id, row_index, lang_code, source_text, w
                 logger.info(f"WORKER [{task_id} / {row_identifier}]: Using VS ID {vs_id_for_s1} for Stage 1 OpenAI call.")
                 
             audit_record = {**audit_record_base, "stage1_api": s1_api, "stage1_model": s1_model or "default"}
-            logger.debug(f"WORKER [{task_id} / {row_identifier}]: Calling API (Stage 1) - API: {s1_api}, Model: {s1_model or 'default'}, VS_ID: {vs_id_for_s1}") 
+            # Add minimal change context info to audit if applied
+            if apply_minimal_change and minimal_change_context:
+                audit_record["existing_target_preview"] = minimal_change_context['existing_target_text'][:50] + "..."
+                
+            logger.debug(f"WORKER [{task_id} / {row_identifier}]: Calling API (Stage 1) - API: {s1_api}, Model: {s1_model or 'default'}, VS_ID: {vs_id_for_s1}, MinimalChange: {apply_minimal_change}") 
             initial_translation_local = call_active_api(
                 s1_api, 
                 stage1_prompt, # Already includes glossary if generated
@@ -757,11 +814,12 @@ def translate_row_worker(task_id, batch_id, row_index, lang_code, source_text, w
                     language_code=lang_code, 
                     base_variables={"source_text": source_text, "initial_translation": initial_translation_local},
                     batch_prompt=batch_prompt,
-                    generated_glossary=generated_glossary
+                    generated_glossary=generated_glossary,
+                    minimal_change_context=minimal_change_context if apply_minimal_change else None # <<< PASS CONTEXT >>>
                 )
                 if not stage2_prompt:
                      raise ValueError(f"Could not generate Stage 2 prompt for {lang_code}")
-                logger.debug(f"WORKER [{task_id} / {row_identifier}]: Calling API (Stage 2) - API: {s2_api}, Model: {s2_model or 'default'}, VS_ID: {vs_id_for_s2}") 
+                logger.debug(f"WORKER [{task_id} / {row_identifier}]: Calling API (Stage 2) - API: {s2_api}, Model: {s2_model or 'default'}, VS_ID: {vs_id_for_s2}, MinimalChange: {apply_minimal_change}") 
                 evaluation_result = call_active_api(
                     s2_api, 
                     stage2_prompt, 
@@ -803,11 +861,12 @@ def translate_row_worker(task_id, batch_id, row_index, lang_code, source_text, w
                         base_variables={"source_text": source_text, "initial_translation": initial_translation_local},
                         stage_variables={"feedback": evaluation_feedback_local},
                         batch_prompt=batch_prompt,
-                        generated_glossary=generated_glossary
+                        generated_glossary=generated_glossary,
+                        minimal_change_context=minimal_change_context if apply_minimal_change else None # <<< PASS CONTEXT >>>
                     )
                     if not stage3_prompt:
                          raise ValueError(f"Could not generate Stage 3 prompt for {lang_code}")
-                    logger.debug(f"WORKER [{task_id} / {row_identifier}]: Calling API (Stage 3) - API: {s3_api}, Model: {s3_model or 'default'}, VS_ID: {vs_id_for_s3}") 
+                    logger.debug(f"WORKER [{task_id} / {row_identifier}]: Calling API (Stage 3) - API: {s3_api}, Model: {s3_model or 'default'}, VS_ID: {vs_id_for_s3}, MinimalChange: {apply_minimal_change}") 
                     final_translation_local = call_active_api(
                         s3_api, 
                         stage3_prompt, 
@@ -863,7 +922,10 @@ def translate_row_worker(task_id, batch_id, row_index, lang_code, source_text, w
                                        final_tx=final_translation_local, 
                                        approved_tx=approved_translation_local, 
                                        review_sts=review_status_local, 
-                                       error_msg=error_message_local)
+                                       error_msg=error_message_local,
+                                       stage0_glossary=generated_glossary,
+                                       stage0_raw_output=stage0_raw,
+                                       stage0_status=stage0_status)
         except Exception as db_e:
              logger.error(f"WORKER [{task_id} / {row_identifier}]: CRITICAL - Failed to update DB after worker exception: {db_e}")
         return False, None
@@ -880,7 +942,8 @@ def translate_row_worker(task_id, batch_id, row_index, lang_code, source_text, w
                                    review_sts=review_status_local,
                                    error_msg=error_message_local,
                                    stage0_glossary=generated_glossary,
-                                   stage0_raw_output=stage0_raw)
+                                   stage0_raw_output=stage0_raw,
+                                   stage0_status=stage0_status)
         logger.debug(f"WORKER [{task_id} / {row_identifier}]: Final DB update complete.")
         return final_status == 'completed', final_translation_local
     except Exception as final_db_e:
@@ -937,7 +1000,8 @@ def run_batch_background(batch_id):
         'target_column_tpl': config.TARGET_COLUMN_TPL,
         'use_vs': batch_config.get('use_vs', False),
         'openai_client': openai_client_thread,
-        'batch_prompt': batch_prompt
+        'batch_prompt': batch_prompt,
+        'update_strategy': batch_config.get('update_strategy', 'retranslate')
     }
     
     processed_task_results = {} 
@@ -1020,13 +1084,32 @@ def prepare_batch(input_file_path, original_filename, selected_languages, mode_c
                 
                 for lang_code in selected_languages:
                     target_col_name = config.TARGET_COLUMN_TPL.format(lang_code=lang_code)
+                    # --- Get initial target text from input file --- 
+                    initial_target_text_from_file = None
+                    if target_col_name in row:
+                        initial_target_text_from_file = row[target_col_name]
+                        if isinstance(initial_target_text_from_file, str):
+                             initial_target_text_from_file = initial_target_text_from_file.strip()
+                         # Ensure empty strings are treated as None or empty for consistency, maybe check later
+                         # if not initial_target_text_from_file:
+                         #     initial_target_text_from_file = None 
+                    # --- End get initial target text ---
+
                     # Check language availability (prompt and column)
                     if lang_code in prompt_manager.stage1_templates and target_col_name in target_columns_in_file:
                          # Add task details to a list for bulk insertion later?
                          # For now, add one by one
-                         logger.debug(f"Batch {batch_id}, Row {i}, Lang {lang_code}: Calling add_translation_task...") # Added log
-                         db_manager.add_translation_task(db_path, batch_id, i, lang_code, source_text, metadata_json)
-                         # tasks_to_create.append((batch_id, i, lang_code, source_text, metadata_json))
+                         logger.debug(f"Batch {batch_id}, Row {i}, Lang {lang_code}: Calling add_translation_task... Initial Target: '{initial_target_text_from_file}'") # Added log
+                         db_manager.add_translation_task(
+                             db_path, 
+                             batch_id, 
+                             i, 
+                             lang_code, 
+                             source_text, 
+                             metadata_json,
+                             initial_target_text=initial_target_text_from_file # <<< PASS VALUE >>>
+                         )
+                         # tasks_to_create.append((batch_id, i, lang_code, source_text, metadata_json, initial_target_text_from_file))
                     elif lang_code not in prompt_manager.stage1_templates:
                          logger.warning(f"Skipping language {lang_code} for row {i}: Lang code not available (missing prompt file?).")
     except Exception as e:

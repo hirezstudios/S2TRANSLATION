@@ -24,6 +24,9 @@ This application uses a Flask + Python Threading + Frontend Polling architecture
     *   `ONE_STAGE`: Direct translation.
     *   `THREE_STAGE`: Translate -> Evaluate -> Refine.
     *   `FOUR_STAGE`: **Glossary Generation (S0)** -> Translate (S1) -> Evaluate (S2) -> Refine (S3).
+*   **Update Strategy Selection:**
+    *   `Update Existing` (Default): If target column in input CSV has text, attempt minimal changes to align with new source text. Requires careful prompt tuning.
+    *   `Re-translate`: Ignore any existing text in target columns and perform a full re-translation.
 *   **API/Model Configuration:** Select API providers and optionally override default models for each stage (S0 must be OpenAI).
 *   **Batch-Specific Prompt:** Optionally provide additional instructions for an entire batch on the Home page.
 *   **Vector Store Assistance (Optional/Mandatory):** 

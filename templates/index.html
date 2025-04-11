@@ -45,6 +45,25 @@
                     <!-- End Add -->
                 </div>
                 
+                <!-- New Update Strategy Section -->
+                <label class="form-label d-block mt-3">Update Strategy (If Target Column Exists)</label>
+                <div class="mb-2">
+                    <div class="form-check">
+                        <input class="form-check-input" type="radio" name="update_strategy" id="strategy_retranslate" value="retranslate">
+                        <label class="form-check-label" for="strategy_retranslate">
+                            Re-translate (Ignore existing translation in target column)
+                        </label>
+                    </div>
+                    <div class="form-check">
+                        <input class="form-check-input" type="radio" name="update_strategy" id="strategy_update_existing" value="update_existing" checked>
+                        <label class="form-check-label" for="strategy_update_existing">
+                            Update Existing (Make minimal changes based on new source)
+                        </label>
+                        <small class="form-text text-muted d-block">Requires non-empty target columns in the input file.</small>
+                    </div>
+                </div>
+                <!-- End Update Strategy Section -->
+
                 <!-- Button to toggle advanced config -->
                 <button class="btn btn-outline-secondary btn-sm" type="button" data-bs-toggle="collapse" data-bs-target="#collapseApiConfig" aria-expanded="false" aria-controls="collapseApiConfig">
                     Advanced API/Model Settings
@@ -331,6 +350,12 @@
             statusText += ` (${data.completed_tasks + data.error_tasks}/${data.total_tasks} tasks processed)`;
         }
         
+        // <<< ADD STAGE 0 SKIPPED WARNING >>>
+        if (data.skipped_stage0_count && data.skipped_stage0_count > 0) {
+            statusText += ` <span class="text-warning">(Note: Stage 0 skipped for ${data.skipped_stage0_count} tasks due to missing VS)</span>`;
+        }
+        // <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
+
         // Show progress bar only if not complete and there are tasks
         if (!isComplete && data.total_tasks > 0) { 
             progressBar.style.width = `${progressPercent}%`;

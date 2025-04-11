@@ -153,13 +153,90 @@ def get_full_prompt(
     base_variables: Optional[Dict[str, str]] = None,
     stage_variables: Optional[Dict[str, str]] = None,
     batch_prompt: Optional[str] = None,
-    generated_glossary: Optional[str] = None
+    generated_glossary: Optional[str] = None,
+    minimal_change_context: Optional[Dict[str, str]] = None
 ) -> Optional[str]:
-    """Constructs the full system prompt for a given stage and language."""
+    """Constructs the full system prompt for a given stage and language.
+       Includes logic for prepending minimal change instructions if context is provided.
+    """
     
     # Final instruction (applied to stages 1, 2, 3)
     final_instruction = "\n\n**IMPORTANT FINAL INSTRUCTION: Your final output should contain ONLY the final text (translation/evaluation/revision). No extra text, formatting, or explanations.**"
     
+    # --- Minimal Change Prefix Construction (if applicable) ---
+    minimal_change_prefix = ""
+    if minimal_change_context: # Check if context dict exists
+        existing_target = minimal_change_context.get('existing_target_text', '')
+        new_source = minimal_change_context.get('new_english_source', '')
+        lang_name_local = config.LANGUAGE_NAME_MAP.get(language_code, language_code) # Need lang name here too
+        
+        # Only construct if we have the necessary pieces
+        if existing_target and new_source and prompt_type in ["1", "2", "3"]:
+            logger.debug(f"Constructing minimal change prefix for Stage {prompt_type}")
+            # Stage-specific instruction formatting
+            if prompt_type == "1":
+                minimal_change_prefix = f"""
+**UPDATE TASK:**
+The previous translation for this text in {lang_name_local} was:
+"{existing_target}"
+
+The NEW English source text is:
+"{new_source}"
+
+Your goal is to UPDATE the previous {lang_name_local} translation by making the *minimum necessary changes* to accurately reflect the meaning of the NEW English source. Preserve as much of the original phrasing and style as possible while ensuring accuracy.
+
+Apply the following general rules and context, giving precedence to the minimal update goal if conflicts arise:
+---
+
+"""
+            elif prompt_type == "2":
+                # Stage 2 needs the proposed S1 update from base_variables
+                proposed_update = base_variables.get('initial_translation', '') if base_variables else ''
+                minimal_change_prefix = f"""
+**EVALUATE UPDATE TASK:**
+Previous {lang_name_local} Translation: "{existing_target}"
+New English Source: "{new_source}"
+Proposed Updated {lang_name_local} Translation: "{proposed_update}"
+
+Evaluate the "Proposed Updated Translation". Consider these points:
+1.  Accuracy: Does it accurately reflect the meaning of the *New English Source*?
+2.  Minimality: Was the change from the "Previous Translation" minimal and targeted, or was it overly rewritten?
+3.  Fluency/Style: Is the updated translation natural and consistent with the likely style?
+4.  Rule Adherence: Does it follow the general rules provided below?
+
+Provide feedback focusing on any inaccuracies or unnecessary deviations from the previous translation. Score based on overall success (1-5, 5 being a perfect minimal update).
+
+Score: [Your Score]
+Feedback: [Your Feedback]
+
+General Rules (Apply these giving precedence to the minimal update goal if conflicts arise):
+---
+
+"""
+            elif prompt_type == "3":
+                # Stage 3 needs S1 update and S2 feedback
+                proposed_update = base_variables.get('initial_translation', '') if base_variables else ''
+                feedback = stage_variables.get('feedback', '') if stage_variables else ''
+                minimal_change_prefix = f"""
+**REFINE UPDATE TASK:**
+Previous {lang_name_local} Translation: "{existing_target}"
+New English Source: "{new_source}"
+Initial Proposed Update: "{proposed_update}"
+Evaluation Feedback: "{feedback}"
+
+Revise the "Initial Proposed Update" based *only* on the "Evaluation Feedback". Maintain the goal of making the *minimum necessary changes* compared to the "Previous Translation" while addressing the feedback and ensuring accuracy with the "New English Source".
+
+Apply the following general rules and context, giving precedence to the minimal update goal if conflicts arise:
+---
+
+"""
+        else:
+            if prompt_type not in ["1", "2", "3"]:
+                logger.debug(f"Minimal change context provided but ignored for prompt_type {prompt_type}")
+            else:
+                 logger.warning(f"Minimal change context provided but missing required data (existing_target: {bool(existing_target)}, new_source: {bool(new_source)}). Ignoring.")
+    # --- End Minimal Change Prefix Construction ---
+
     # --- Common Setup: Batch Prompt, Language Rules, Global Rules --- 
     batch_prompt_section = ""
     if batch_prompt and batch_prompt.strip():
@@ -203,33 +280,41 @@ def get_full_prompt(
         # logger.debug(f"Full Ruleset Content:\n{full_ruleset_with_glossary}") # Uncomment for full content
         # <<< END TEMP LOGGING >>>
 
+        # --- Assemble Final Prompt with Minimal Change Prefix --- 
+        final_prompt_body = ""
+        
         if prompt_type == "1":
-            # Stage 1: Ruleset + Final Instruction
-            return full_ruleset_with_glossary + final_instruction
+            # Stage 1: Ruleset 
+            final_prompt_body = full_ruleset_with_glossary
         
         elif prompt_type == "2":
-            # Stage 2: Template using Ruleset + Base Variables + Final Instruction
+            # Stage 2: Template using Ruleset + Base Variables 
             if not stage2_template_prompt:
                 raise ValueError("Stage 2 template not loaded.")
-            prompt = stage2_template_prompt.replace("<<TARGET_LANGUAGE_NAME>>", lang_name)\
-                                           .replace("<<RULES>>", full_ruleset_with_glossary)\
-                                           .replace("<<SOURCE_TEXT>>", base_variables.get('source_text') or "")\
+            # NOTE: Base variables (source, initial_tx) are used in the minimal_change_prefix for S2
+            # The standard template here might become redundant or need adjustment if minimal change active?
+            # For now, keep the standard replacement, but the core context is in the prefix.
+            final_prompt_body = stage2_template_prompt.replace("<<TARGET_LANGUAGE_NAME>>", lang_name) \
+                                           .replace("<<RULES>>", full_ruleset_with_glossary) \
+                                           .replace("<<SOURCE_TEXT>>", base_variables.get('source_text') or "") \
                                            .replace("<<INITIAL_TRANSLATION>>", base_variables.get('initial_translation') or "")
-            return prompt + final_instruction
             
         elif prompt_type == "3":
-            # Stage 3: Template using Ruleset + Base Variables + Stage Variables + Final Instruction
+            # Stage 3: Template using Ruleset + Base Variables + Stage Variables 
             if not stage3_template_prompt:
                 raise ValueError("Stage 3 template not loaded.")
-            prompt = stage3_template_prompt.replace("<<TARGET_LANGUAGE_NAME>>", lang_name)\
-                                           .replace("<<RULES>>", full_ruleset_with_glossary)\
-                                           .replace("<<SOURCE_TEXT>>", base_variables.get('source_text') or "")\
-                                           .replace("<<INITIAL_TRANSLATION>>", base_variables.get('initial_translation') or "")\
+            # Similar to S2, core context is in the prefix.
+            final_prompt_body = stage3_template_prompt.replace("<<TARGET_LANGUAGE_NAME>>", lang_name) \
+                                           .replace("<<RULES>>", full_ruleset_with_glossary) \
+                                           .replace("<<SOURCE_TEXT>>", base_variables.get('source_text') or "") \
+                                           .replace("<<INITIAL_TRANSLATION>>", base_variables.get('initial_translation') or "") \
                                            .replace("<<FEEDBACK>>", stage_variables.get('feedback') or "")
-            return prompt + final_instruction
             
         else:
             raise ValueError(f"Invalid prompt type: {prompt_type}")
+
+        # Combine Prefix (if any) + Body + Final Instruction
+        return minimal_change_prefix + final_prompt_body + final_instruction
 
 def parse_evaluation(evaluation_text: str) -> Tuple[Optional[int], Optional[str]]:
     """

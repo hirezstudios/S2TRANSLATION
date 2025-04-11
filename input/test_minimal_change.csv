@@ -1,0 +1,8 @@
+src_enUS,tg_esLA,tg_frFR,notes
+"This is a great day","Este es un gran día","C'est une belle journée","Original phrase"
+"This is a great rainy day","Este es un gran día","","English changed, esLA has old translation, frFR empty"
+"Collect the blue orb","Recoge el orbe azul","Ramassez l'orbe bleu","Original phrase"
+"Quickly! Collect the blue orb!","","Ramassez l'orbe bleu","English changed, esLA empty, frFR has old translation"
+"The old castle stands tall","El viejo castillo se alza imponente","Le vieux château se dresse fièrement","Original phrase"
+"The crumbling old castle stands tall","El viejo castillo se alza imponente","Le vieux château se dresse fièrement","English changed, both have old translations"
+"Empty Source Test","","","Test empty target cells" 

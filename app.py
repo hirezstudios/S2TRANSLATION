@@ -380,9 +380,11 @@ def create_app():
             use_vs = True if mode == 'FOUR_STAGE' else request.form.get('use_vector_store') == 'true' # Checkbox value is 'true' when checked
             # --- NEW: Get Batch Prompt ---
             batch_prompt_text = request.form.get('batch_prompt', '').strip()
-            # -----------------------------
+            # --- NEW: Get Update Strategy --- 
+            update_strategy = request.form.get('update_strategy', 'retranslate') # Default to 'retranslate'
+            # --------------------------------
             
-            logger.info(f"Form Data Received - Mode: {mode}, Languages: {selected_languages}, Use VS: {use_vs}")
+            logger.info(f"Form Data Received - Mode: {mode}, Strategy: {update_strategy}, Languages: {selected_languages}, Use VS: {use_vs}")
             if not selected_languages:
                  return jsonify({"error": "No languages selected"}), 400
 
@@ -404,7 +406,8 @@ def create_app():
                     "s2_api": None, "s2_model": None,
                     "s3_api": None, "s3_model": None,
                     "use_vs": use_vs, # Add VS preference
-                    "batch_prompt": batch_prompt_text # --- ADD BATCH PROMPT --- 
+                    "batch_prompt": batch_prompt_text,
+                    "update_strategy": update_strategy # <<< ADD STRATEGY >>>
                  }
             elif mode == "THREE_STAGE":
                  mode_config = {
@@ -418,23 +421,32 @@ def create_app():
                     "s2_model": s2_model,
                     "s3_model": s3_model,
                     "use_vs": use_vs, # Add VS preference
-                    "batch_prompt": batch_prompt_text # --- ADD BATCH PROMPT --- 
+                    "batch_prompt": batch_prompt_text,
+                    "update_strategy": update_strategy # <<< ADD STRATEGY >>>
                 }
             elif mode == "FOUR_STAGE":
+                # Need to get the specific S1/S2/S3 APIs/models for four stage
+                s0_model = request.form.get('s0_model') or config.S0_MODEL
+                s1_api_four = request.form.get('s1_api_four', config.STAGE1_API)
+                s1_model_four = request.form.get('s1_model_four') or None
+                s2_api_four = request.form.get('s2_api_four', config.STAGE2_API)
+                s2_model_four = request.form.get('s2_model_four') or None
+                s3_api_four = request.form.get('s3_api_four', config.STAGE3_API)
+                s3_model_four = request.form.get('s3_model_four') or None
+                # VS is always true for four stage
                 mode_config = {
                     "mode": mode,
-                    "languages": selected_languages,
-                    "use_vs": use_vs,
-                    "batch_prompt": batch_prompt_text
+                    "s0_model": s0_model,
+                    "s1_api": s1_api_four,
+                    "s1_model": s1_model_four,
+                    "s2_api": s2_api_four,
+                    "s2_model": s2_model_four,
+                    "s3_api": s3_api_four,
+                    "s3_model": s3_model_four,
+                    "batch_prompt": batch_prompt_text,
+                    "use_vs": True,
+                    "update_strategy": update_strategy # <<< ADD STRATEGY >>>
                 }
-                mode_config['s0_api'] = 'OPENAI'
-                mode_config['s0_model'] = request.form.get('s0_model', config.S0_MODEL) or config.S0_MODEL
-                mode_config['s1_api'] = request.form.get('s1_api_four', config.STAGE1_API)
-                mode_config['s1_model'] = request.form.get('s1_model_four') or None
-                mode_config['s2_api'] = request.form.get('s2_api_four', config.STAGE2_API)
-                mode_config['s2_model'] = request.form.get('s2_model_four') or None
-                mode_config['s3_api'] = request.form.get('s3_api_four', config.STAGE3_API)
-                mode_config['s3_model'] = request.form.get('s3_model_four') or None
             else:
                 logger.error(f"Invalid mode received: {mode}")
                 return jsonify({"error": "Invalid translation mode selected"}), 400
@@ -468,48 +480,41 @@ def create_app():
              logger.exception(f"Error in /start_job: {e}") # Use exception for traceback
              return jsonify({"error": "An unexpected error occurred processing the request."}), 500
              
-    # Add status endpoint
     @app.route('/status/<batch_id>')
-    def batch_status(batch_id):
-        logger.debug(f"Received status request for batch {batch_id}")
-        db_path = config.DATABASE_FILE # Get DB path
-        try:
-            batch_info = db_manager.get_batch_info(db_path, batch_id)
-            if not batch_info:
-                return jsonify({"error": "Batch not found"}), 404
-            batch_status_db = batch_info['status'] 
-            # Get mode from config details
-            mode = "UNKNOWN"
-            try:
-                 if batch_info['config_details']:
-                     batch_config = json.loads(batch_info['config_details'])
-                     mode = batch_config.get('mode', 'UNKNOWN')
-            except Exception:
-                 logger.warning(f"Could not determine mode from config for batch {batch_id}")
-            
-            # Use count function for efficiency
-            total_tasks = db_manager.count_tasks_for_batch(db_path, batch_id)
-            # Use specific statuses for counts
-            completed_tasks = db_manager.count_tasks_by_status(db_path, batch_id, 'completed') # Need this function
-            error_tasks = db_manager.count_tasks_by_status(db_path, batch_id, 'error') # Need this function
-            
-            # Calculate pending/running if needed for progress bar
-            # pending_tasks = db_manager.count_tasks_by_status(db_path, batch_id, 'pending')
-            # running_tasks = db_manager.count_tasks_by_status(db_path, batch_id, 'running')
+    def get_batch_status(batch_id):
+        db_path = config.DATABASE_FILE
+        batch_info = db_manager.get_batch_info(db_path, batch_id)
+        if not batch_info:
+            return jsonify({"error": "Batch not found"}), 404
 
-            return jsonify({
-                "batch_id": batch_id,
-                "batch_status": batch_status_db, # Use specific name
-                "mode": mode, # Add mode to response
-                "total_tasks": total_tasks,
-                "completed_tasks": completed_tasks,
-                "error_tasks": error_tasks
-            })
+        total_tasks = db_manager.count_tasks_for_batch(db_path, batch_id)
+        # Count tasks that are definitively finished (completed or failed/error)
+        completed_tasks = db_manager.count_tasks_by_status(db_path, batch_id, 'completed')
+        # Consider different error statuses if used (e.g., 'failed', 'error')
+        error_tasks = db_manager.count_tasks_by_status(db_path, batch_id, 'failed') 
+        error_tasks += db_manager.count_tasks_by_status(db_path, batch_id, 'error') # Add older 'error' status too?
+
+        response_data = {
+            "batch_id": batch_id,
+            "batch_status": batch_info['status'],
+            "total_tasks": total_tasks,
+            "completed_tasks": completed_tasks,
+            "error_tasks": error_tasks
+        }
+
+        # <<< ADD STAGE 0 SKIPPED COUNT for FOUR_STAGE >>>
+        try:
+            batch_config = json.loads(batch_info['config_details'] or '{}')
+            if batch_config.get('mode') == 'FOUR_STAGE':
+                skipped_s0_count = db_manager.count_tasks_with_stage0_status(db_path, batch_id, 'skipped_no_vs')
+                if skipped_s0_count > 0:
+                     response_data['skipped_stage0_count'] = skipped_s0_count
         except Exception as e:
-            logger.exception(f"Error fetching status for batch {batch_id}: {e}") # Use exception
-            return jsonify({"error": "Failed to fetch status"}), 500
-            
-    # Add Export route
+            logger.warning(f"Could not check Stage 0 skipped status for batch {batch_id}: {e}")
+        # <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
+
+        return jsonify(response_data)
+
     @app.route('/export/<batch_id>')
     def export_batch(batch_id):
         logger.info(f"Received export request for batch {batch_id}")

@@ -17,6 +17,14 @@
             </div>
         </div>
 
+        <!-- New Batch Prompt Section -->
+        <div class="mb-3">
+            <label for="batch-prompt-input" class="form-label">Batch-Specific Instructions (Optional)</label>
+            <textarea class="form-control" id="batch-prompt-input" name="batch_prompt" rows="3" placeholder="Enter any instructions specific to this entire batch (e.g., focus on formal tone, specific character names to watch for...)"></textarea>
+            <small class="form-text text-muted">This prompt will be added to the instructions for every translation in this batch.</small>
+        </div>
+        <!-- End New Batch Prompt Section -->
+
         <div class="row mb-3">
             <div class="col-md-6">
                 <label class="form-label d-block">Translation Mode</label>
@@ -26,9 +34,15 @@
                         <label class="form-check-label" for="mode_one">One Stage</label>
                     </div>
                     <div class="form-check form-check-inline">
-                        <input class="form-check-input" type="radio" name="mode" id="mode_three" value="THREE_STAGE" checked>
+                        <input class="form-check-input" type="radio" name="mode" id="mode_three" value="THREE_STAGE">
                         <label class="form-check-label" for="mode_three">Three Stage</label>
                     </div>
+                    <!-- Add Four Stage Radio -->
+                    <div class="form-check form-check-inline">
+                        <input class="form-check-input" type="radio" name="mode" id="mode_four" value="FOUR_STAGE" checked>
+                        <label class="form-check-label" for="mode_four">Four Stage (Glossary + 3)</label>
+                    </div>
+                    <!-- End Add -->
                 </div>
                 
                 <!-- Button to toggle advanced config -->
@@ -38,9 +52,9 @@
             </div>
 
             <!-- Collapsible API Configuration Section -->
-            <div class="col-md-6 collapse" id="collapseApiConfig"> 
+            <div class="col-md-6 collapse" id="collapseApiConfig">
                 <label class="form-label">API Configuration Details</label>
-                <div id="api-config-one-stage" class="mt-2 p-3 border rounded bg-light">
+                <div id="api-config-one-stage" class="mt-2 p-3 border rounded bg-light" style="display: none;"> {# Initially hidden #}
                     <h6>One Stage API</h6>
                     <select class="form-select mb-2" name="one_stage_api" id="one_stage_api">
                         {% for api in valid_apis %}
@@ -49,7 +63,7 @@
                     </select>
                     <input type="text" class="form-control form-control-sm" name="one_stage_model" placeholder="Optional Model Override">
                 </div>
-                <div id="api-config-three-stage" style="display: none;" class="mt-2 p-3 border rounded bg-light">
+                <div id="api-config-three-stage" style="display: block;" class="mt-2 p-3 border rounded bg-light"> {# Initially shown #}
                      <h6>Three Stage APIs</h6>
                      <label class="form-label small">Stage 1 API:</label>
                      <select class="form-select form-select-sm mb-1" name="s1_api" id="s1_api">
@@ -75,6 +89,50 @@
                      </select>
                      <input type="text" class="form-control form-control-sm" name="s3_model" placeholder="S3 Model Override">
                 </div>
+                <!-- Add Four Stage Config Section -->
+                <div id="api-config-four-stage" style="display: none;" class="mt-2 p-3 border rounded bg-light"> 
+                     <h6>Four Stage APIs (S0 Must be OpenAI)</h6>
+                     
+                     <label class="form-label small">Stage 0 API:</label>
+                     <select class="form-select form-select-sm mb-1" name="s0_api" id="s0_api" disabled>
+                         <option value="OPENAI" selected>OPENAI</option>
+                     </select>
+                     <input type="text" class="form-control form-control-sm mb-2" name="s0_model" placeholder="S0 Model Override (Default: {{ config.S0_MODEL }})">
+                     
+                     <label class="form-label small">Stage 1 API:</label>
+                     <select class="form-select form-select-sm mb-1" name="s1_api_four" id="s1_api_four"> {# Use unique IDs for four stage #}
+                         {% for api in valid_apis %}
+                        <option value="{{ api }}" {% if api == default_apis.S1 %}selected{% endif %}>{{ api }}</option>
+                        {% endfor %}
+                     </select>
+                     <input type="text" class="form-control form-control-sm mb-2" name="s1_model_four" placeholder="S1 Model Override">
+                     
+                     <label class="form-label small">Stage 2 API:</label>
+                     <select class="form-select form-select-sm mb-1" name="s2_api_four" id="s2_api_four">
+                         {% for api in valid_apis %}
+                        <option value="{{ api }}" {% if api == default_apis.S2 %}selected{% endif %}>{{ api }}</option>
+                        {% endfor %}
+                     </select>
+                     <input type="text" class="form-control form-control-sm mb-2" name="s2_model_four" placeholder="S2 Model Override">
+
+                     <label class="form-label small">Stage 3 API:</label>
+                     <select class="form-select form-select-sm mb-1" name="s3_api_four" id="s3_api_four">
+                         {% for api in valid_apis %}
+                        <option value="{{ api }}" {% if api == default_apis.S3 %}selected{% endif %}>{{ api }}</option>
+                        {% endfor %}
+                     </select>
+                     <input type="text" class="form-control form-control-sm" name="s3_model_four" placeholder="S3 Model Override">
+                </div>
+            </div>
+        </div>
+
+        <!-- Vector Store Assistance Option -->
+        <div class="mb-3">
+            <div class="form-check">
+                <input class="form-check-input" type="checkbox" id="use-vector-store" name="use_vector_store" value="true" disabled> {# Disabled by default #}
+                <label class="form-check-label text-muted" for="use-vector-store" id="use-vector-store-label"> {# Start muted #}
+                    Use Vector Store Assistance <span class="text-muted">(Requires OpenAI API for Stage 1)</span>
+                </label>
             </div>
         </div>
 
@@ -94,6 +152,7 @@
 
 {% block scripts %}
 <script>
+    // --- Element References --- 
     const fileInput = document.getElementById('csvfile');
     const langOptionsDiv = document.getElementById('language-options');
     const startBtn = document.getElementById('start-job-btn');
@@ -102,47 +161,227 @@
     const progressArea = document.getElementById('progress-area');
     const progressBar = document.getElementById('progress-bar');
     const exportArea = document.getElementById('export-area');
+    
+    const modeOneRadio = document.getElementById('mode_one');
+    const modeThreeRadio = document.getElementById('mode_three');
+    const modeFourRadio = document.getElementById('mode_four');
+    const oneStageConfigDiv = document.getElementById('api-config-one-stage');
+    const threeStageConfigDiv = document.getElementById('api-config-three-stage');
+    const fourStageConfigDiv = document.getElementById('api-config-four-stage');
+    const oneStageApiSelect = document.getElementById('one_stage_api');
+    const stage1ApiSelect = document.getElementById('s1_api');
+    const useVsCheckbox = document.getElementById('use-vector-store');
+    const useVsLabel = document.getElementById('use-vector-store-label');
+    
     let currentBatchId = null;
     let statusInterval = null;
 
-    // --- Toggle API Config UI --- 
-    const modeRadios = document.querySelectorAll('input[name="mode"]');
-    const oneStageConfigDiv = document.getElementById('api-config-one-stage');
-    const threeStageConfigDiv = document.getElementById('api-config-three-stage');
-    
+    // --- Functions --- 
+
+    // Function to toggle API config display and disable/enable fields
     function toggleApiConfigVisibility() {
-        // This function now ONLY toggles between the ONE and THREE stage sections *within* the collapsible div
-        if (document.getElementById('mode_one').checked) {
+        // Disable all fields first
+        oneStageConfigDiv.querySelectorAll('select, input').forEach(el => el.disabled = true);
+        threeStageConfigDiv.querySelectorAll('select, input').forEach(el => el.disabled = true);
+        fourStageConfigDiv.querySelectorAll('select, input').forEach(el => el.disabled = true);
+        // Re-enable the S0 API select specifically, as it should always be shown/disabled
+        fourStageConfigDiv.querySelector('select[name="s0_api"]').disabled = true; 
+        
+        // Hide all config sections first
+        oneStageConfigDiv.style.display = 'none';
+        threeStageConfigDiv.style.display = 'none';
+        fourStageConfigDiv.style.display = 'none';
+
+        if (modeOneRadio.checked) {
             oneStageConfigDiv.style.display = 'block';
-            threeStageConfigDiv.style.display = 'none';
-        } else {
-            oneStageConfigDiv.style.display = 'none';
+            oneStageConfigDiv.querySelectorAll('select, input').forEach(el => el.disabled = false);
+        } else if (modeThreeRadio.checked) {
             threeStageConfigDiv.style.display = 'block';
+            threeStageConfigDiv.querySelectorAll('select, input').forEach(el => el.disabled = false);
+        } else if (modeFourRadio.checked) { // <<< HANDLE FOUR STAGE >>>
+            fourStageConfigDiv.style.display = 'block';
+            // Enable all four-stage inputs/selects *except* the S0 API selector
+            fourStageConfigDiv.querySelectorAll('input, select:not([name="s0_api"])').forEach(el => el.disabled = false);
+        }
+        updateVectorStoreCheckbox(); // Also update checkbox state when mode changes
+    }
+
+    // Function to update Vector Store checkbox state based on mode and API selection
+    function updateVectorStoreCheckbox() {
+        let enableCheckbox = false;
+        let forceCheck = false; // Flag to force check for Four Stage
+
+        if (modeOneRadio.checked && oneStageApiSelect.value === 'OPENAI') {
+            enableCheckbox = true;
+        } else if (modeThreeRadio.checked && stage1ApiSelect.value === 'OPENAI') {
+            enableCheckbox = true;
+        } else if (modeFourRadio.checked) { // <<< HANDLE FOUR STAGE >>>
+            enableCheckbox = true; // Always enabled for Four Stage
+            forceCheck = true;     // And always checked
+        }
+
+        useVsCheckbox.disabled = !enableCheckbox;
+        if (enableCheckbox) {
+            useVsLabel.classList.remove('text-muted'); // Make label normal
+            useVsCheckbox.checked = forceCheck || useVsCheckbox.checked; // Check if forced, otherwise keep current state (relevant for S1/S3 enabling)
+            // Ensure it gets checked if forced
+            if (forceCheck) useVsCheckbox.checked = true;
+        } else {
+            useVsLabel.classList.add('text-muted'); // Grey out label text
+            useVsCheckbox.checked = false; // Uncheck if disabled
         }
     }
-    modeRadios.forEach(radio => radio.addEventListener('change', toggleApiConfigVisibility));
-    // Initial call remains important to set the correct display based on default mode
-    toggleApiConfigVisibility(); 
 
-    // --- Fetch Valid Languages on File Change --- 
+    // Function to populate language options fetched from server
+    function populateLanguageOptions(languages) {
+        langOptionsDiv.innerHTML = ''; // Clear previous
+        if (!languages || languages.length === 0) {
+            langOptionsDiv.innerHTML = '<p class="text-warning">No translatable languages found in file/config.</p>';
+            startBtn.disabled = true;
+            return;
+        }
+        
+        // Add Select All / Unselect All buttons
+        const controlsDiv = document.createElement('div');
+        controlsDiv.classList.add('mb-2');
+        const selectAllBtn = document.createElement('button');
+        selectAllBtn.type = 'button';
+        selectAllBtn.classList.add('btn', 'btn-outline-secondary', 'btn-sm', 'me-2');
+        selectAllBtn.textContent = 'Select All';
+        selectAllBtn.onclick = () => {
+            langOptionsDiv.querySelectorAll('input[name="languages"]').forEach(cb => cb.checked = true);
+        };
+        const unselectAllBtn = document.createElement('button');
+        unselectAllBtn.type = 'button';
+        unselectAllBtn.classList.add('btn', 'btn-outline-secondary', 'btn-sm');
+        unselectAllBtn.textContent = 'Unselect All';
+        unselectAllBtn.onclick = () => {
+            langOptionsDiv.querySelectorAll('input[name="languages"]').forEach(cb => cb.checked = false);
+        };
+        controlsDiv.appendChild(selectAllBtn);
+        controlsDiv.appendChild(unselectAllBtn);
+        langOptionsDiv.appendChild(controlsDiv);
+        
+        languages.forEach(lang => {
+            const div = document.createElement('div');
+            div.classList.add('form-check', 'form-check-inline');
+            const input = document.createElement('input');
+            input.classList.add('form-check-input');
+            input.type = 'checkbox';
+            input.value = lang;
+            input.id = `lang_${lang}`;
+            input.name = 'languages';
+            input.checked = true; 
+            const label = document.createElement('label');
+            label.classList.add('form-check-label');
+            label.htmlFor = `lang_${lang}`;
+            label.textContent = lang;
+            div.appendChild(input);
+            div.appendChild(label);
+            langOptionsDiv.appendChild(div);
+        });
+        startBtn.disabled = false; // Enable start button
+    }
+
+    // Function to set status message
+    function setStatus(message, type = 'info') { 
+        statusArea.innerHTML = `<div class="alert alert-${type}" role="alert">${message}</div>`;
+    }
+
+    // Function to start status polling
+    function startStatusPolling(batchId) {
+        if (statusInterval) clearInterval(statusInterval);
+        statusInterval = setInterval(async () => {
+            try {
+                const response = await fetch(`/status/${batchId}`);
+                if (!response.ok) {
+                    setStatus(`Error fetching status: ${response.statusText}`, 'warning');
+                    return; 
+                }
+                const data = await response.json();
+                updateStatusUI(data);
+                if (data.batch_status === 'completed' || data.batch_status === 'completed_with_errors' || data.batch_status === 'failed' || data.batch_status === 'completed_empty') {
+                    stopStatusPolling();
+                }
+            } catch (error) {
+                console.error('Error polling status:', error);
+                setStatus(`Error polling status: ${error}`, 'warning');
+            }
+        }, 3000); // Poll every 3 seconds
+    }
+
+    // Function to stop status polling
+    function stopStatusPolling() {
+        if (statusInterval) {
+            clearInterval(statusInterval);
+            statusInterval = null;
+            startBtn.disabled = false; // Re-enable start button
+            console.log('Status polling stopped.');
+        }
+    }
+
+    // Function to update the status/progress UI
+    function updateStatusUI(data) {
+        let statusText = `Batch ${data.batch_id}: ${data.batch_status}`; 
+        let progressPercent = 0;
+        const isComplete = (data.batch_status === 'completed' || data.batch_status === 'completed_with_errors' || data.batch_status === 'failed' || data.batch_status === 'completed_empty');
+
+        if(data.total_tasks > 0) {
+            progressPercent = Math.round(((data.completed_tasks + data.error_tasks) / data.total_tasks) * 100);
+            statusText += ` (${data.completed_tasks + data.error_tasks}/${data.total_tasks} tasks processed)`;
+        }
+        
+        // Show progress bar only if not complete and there are tasks
+        if (!isComplete && data.total_tasks > 0) { 
+            progressBar.style.width = `${progressPercent}%`;
+            progressBar.textContent = `${progressPercent}%`;
+            progressBar.setAttribute('aria-valuenow', progressPercent);
+            progressArea.style.display = 'block'; // Ensure visible
+        } else {
+            progressArea.style.display = 'none'; // Hide when complete or no tasks
+        }
+        
+        let alertClass = 'info';
+        if (data.batch_status === 'completed') alertClass = 'success';
+        else if (data.batch_status === 'failed' || data.error_tasks > 0) alertClass = 'danger'; 
+        else if (data.batch_status === 'completed_with_errors') alertClass = 'warning';
+        else if (data.batch_status === 'completed_empty') alertClass = 'secondary'; 
+        
+        setStatus(statusText, alertClass);
+
+        // Add View/Edit Results link on completion 
+        const actionArea = statusArea; 
+        const existingLink = actionArea.querySelector('.results-link');
+        if (existingLink) existingLink.remove(); 
+        
+        const hasTasks = data.total_tasks > 0;
+        const canViewResults = (data.batch_status === 'completed' || data.batch_status === 'completed_with_errors') && hasTasks;
+
+        if (canViewResults) {
+             const resultsLink = document.createElement('a');
+             resultsLink.href = `/results/${data.batch_id}`;
+             resultsLink.textContent = 'View/Edit Results';
+             resultsLink.classList.add('btn', 'btn-secondary', 'mt-2', 'results-link'); 
+             actionArea.appendChild(resultsLink); 
+        }
+    }
+
+
+    // --- Event Listeners --- 
+
+    // Fetch Valid Languages on File Change 
     fileInput.addEventListener('change', async (event) => {
         langOptionsDiv.innerHTML = '<p class="text-muted">Fetching available languages...</p>';
         startBtn.disabled = true;
         const file = event.target.files[0];
         if (!file) return;
 
-        // Need to upload the file temporarily to get its path on the server
-        // For simplicity, let's just send the file to the get_valid_languages endpoint directly
-        // NOTE: This is inefficient as the file is sent twice (once here, once for job start)
-        // A better approach would be one upload endpoint that returns path + valid langs.
-        // Or, read header client-side if possible (requires JS CSV parsing).
-        // Let's proceed with double-send for now.
         const formData = new FormData();
         formData.append('file', file);
 
         try {
-            // Temporary upload just to get the header processed server-side
-            const tempUploadResponse = await fetch("{{ url_for('upload_temp_file') }}", { // Need this route
+            // Temp upload to get header processed server-side
+            const tempUploadResponse = await fetch("{{ url_for('upload_temp_file') }}", {
                  method: 'POST',
                  body: formData
             });
@@ -150,7 +389,7 @@
             const tempFileData = await tempUploadResponse.json();
             const tempFilePath = tempFileData.file_path;
 
-            // Now get valid languages using the temp path
+            // Get valid languages using the temp path
             const langResponse = await fetch("{{ url_for('get_valid_languages_route') }}", {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
@@ -167,65 +406,13 @@
         }
     });
 
-    function populateLanguageOptions(languages) {
-        langOptionsDiv.innerHTML = ''; // Clear previous
-        if (!languages || languages.length === 0) {
-            langOptionsDiv.innerHTML = '<p class="text-warning">No translatable languages found in file/config.</p>';
-            startBtn.disabled = true;
-            return;
-        }
-        
-        // Add Select All / Unselect All buttons
-        const controlsDiv = document.createElement('div');
-        controlsDiv.classList.add('mb-2'); // Add some margin below the controls
-        const selectAllBtn = document.createElement('button');
-        selectAllBtn.type = 'button';
-        selectAllBtn.classList.add('btn', 'btn-outline-secondary', 'btn-sm', 'me-2');
-        selectAllBtn.textContent = 'Select All';
-        selectAllBtn.onclick = () => {
-            langOptionsDiv.querySelectorAll('input[name=\"languages\"]').forEach(cb => cb.checked = true);
-        };
-        const unselectAllBtn = document.createElement('button');
-        unselectAllBtn.type = 'button';
-        unselectAllBtn.classList.add('btn', 'btn-outline-secondary', 'btn-sm');
-        unselectAllBtn.textContent = 'Unselect All';
-        unselectAllBtn.onclick = () => {
-            langOptionsDiv.querySelectorAll('input[name=\"languages\"]').forEach(cb => cb.checked = false);
-        };
-        controlsDiv.appendChild(selectAllBtn);
-        controlsDiv.appendChild(unselectAllBtn);
-        langOptionsDiv.appendChild(controlsDiv);
-        
-        languages.forEach(lang => {
-            const div = document.createElement('div');
-            div.classList.add('form-check', 'form-check-inline');
-            const input = document.createElement('input');
-            input.classList.add('form-check-input');
-            input.type = 'checkbox';
-            input.value = lang;
-            input.id = `lang_${lang}`;
-            input.name = 'languages'; // Use same name for all
-            input.checked = true; // Default to checked
-            const label = document.createElement('label');
-            label.classList.add('form-check-label');
-            label.htmlFor = `lang_${lang}`;
-            label.textContent = lang;
-            div.appendChild(input);
-            div.appendChild(label);
-            langOptionsDiv.appendChild(div);
-        });
-        startBtn.disabled = false; // Enable start button
-    }
-
-    // --- Handle Job Start --- 
+    // Handle Job Start 
     startBtn.addEventListener('click', async () => {
-        const formData = new FormData(uploadForm); // Collect all form data
-        // Check if file is still selected (it might be cleared by browser)
+        const formData = new FormData(uploadForm); 
         if (!fileInput.files || fileInput.files.length === 0) {
              setStatus('Error: No file selected. Please re-select the file.', 'danger');
              return;
         }
-        // Check if any languages are selected
         const selectedLangs = formData.getAll('languages');
         if (selectedLangs.length === 0) {
              setStatus('Error: No languages selected.', 'danger');
@@ -261,93 +448,20 @@
             startBtn.disabled = false;
         }
     });
+    
+    // Listen for changes on ALL Mode Radio Buttons
+    modeOneRadio.addEventListener('change', toggleApiConfigVisibility);
+    modeThreeRadio.addEventListener('change', toggleApiConfigVisibility);
+    modeFourRadio.addEventListener('change', toggleApiConfigVisibility);
 
-    // --- Status Polling --- 
-    function startStatusPolling(batchId) {
-        if (statusInterval) clearInterval(statusInterval);
-        statusInterval = setInterval(async () => {
-            try {
-                const response = await fetch(`/status/${batchId}`);
-                if (!response.ok) {
-                    // Handle non-OK responses (e.g., 404 if batch ID is wrong initially)
-                    setStatus(`Error fetching status: ${response.statusText}`, 'warning');
-                    // Should we stop polling on non-OK? Maybe after a few tries.
-                    // For now, let it continue, might recover.
-                    return; 
-                }
-                const data = await response.json();
-                updateStatusUI(data);
-                if (data.batch_status === 'completed' || data.batch_status === 'completed_with_errors' || data.batch_status === 'failed' || data.batch_status === 'completed_empty') {
-                    stopStatusPolling();
-                }
-            } catch (error) {
-                console.error('Error polling status:', error);
-                setStatus(`Error polling status: ${error}`, 'warning');
-                // Maybe stop polling after several consecutive errors?
-            }
-        }, 3000); // Poll every 3 seconds
-    }
+    // Listen for changes on relevant API Selectors
+    oneStageApiSelect.addEventListener('change', updateVectorStoreCheckbox);
+    stage1ApiSelect.addEventListener('change', updateVectorStoreCheckbox);
 
-    function stopStatusPolling() {
-        if (statusInterval) {
-            clearInterval(statusInterval);
-            statusInterval = null;
-            startBtn.disabled = false; // Re-enable start button
-            console.log('Status polling stopped.');
-        }
-    }
-
-    function updateStatusUI(data) {
-        let statusText = `Batch ${data.batch_id}: ${data.batch_status}`; 
-        let progressPercent = 0;
-        const isComplete = (data.batch_status === 'completed' || data.batch_status === 'completed_with_errors' || data.batch_status === 'failed' || data.batch_status === 'completed_empty');
-
-        if(data.total_tasks > 0) {
-            progressPercent = Math.round(((data.completed_tasks + data.error_tasks) / data.total_tasks) * 100);
-            statusText += ` (${data.completed_tasks + data.error_tasks}/${data.total_tasks} tasks processed)`;
-        }
-        
-        // Show progress bar only if not complete and there are tasks
-        if (!isComplete && data.total_tasks > 0) { 
-            progressBar.style.width = `${progressPercent}%`;
-            progressBar.textContent = `${progressPercent}%`;
-            progressBar.setAttribute('aria-valuenow', progressPercent);
-            progressArea.style.display = 'block'; // Ensure visible
-        } else {
-            progressArea.style.display = 'none'; // Hide when complete or no tasks
-        }
-        
-        let alertClass = 'info';
-        if (data.batch_status === 'completed') alertClass = 'success';
-        else if (data.batch_status === 'failed' || data.error_tasks > 0) alertClass = 'danger'; // Keep danger for failed or if errors exist
-        else if (data.batch_status === 'completed_with_errors') alertClass = 'warning';
-        else if (data.batch_status === 'completed_empty') alertClass = 'secondary'; // Added style for empty completion
-        
-        setStatus(statusText, alertClass);
-
-        // Add View/Edit Results link on completion (REMOVE export links)
-        // Clear any previous links/buttons first
-        const actionArea = statusArea; // Or add a dedicated area below status?
-        const existingLink = actionArea.querySelector('.results-link');
-        if (existingLink) existingLink.remove(); 
-        
-        const hasTasks = data.total_tasks > 0;
-        // Update condition to show link for completed or completed_with_errors, only if there were tasks
-        const canViewResults = (data.batch_status === 'completed' || data.batch_status === 'completed_with_errors') && hasTasks;
-
-        if (canViewResults) {
-             // Add View/Edit Results link
-             const resultsLink = document.createElement('a');
-             resultsLink.href = `/results/${data.batch_id}`;
-             resultsLink.textContent = 'View/Edit Results';
-             resultsLink.classList.add('btn', 'btn-secondary', 'mt-2', 'results-link'); // Added margin-top and class
-             actionArea.appendChild(resultsLink); // Append below the status alert
-        }
-    }
-
-    function setStatus(message, type = 'info') { 
-        statusArea.innerHTML = `<div class="alert alert-${type}" role="alert">${message}</div>`;
-    }
+    // --- Initial Setup on Page Load ---
+    document.addEventListener('DOMContentLoaded', () => {
+        toggleApiConfigVisibility(); // Set initial API section visibility and checkbox state
+    });
 
 </script>
-{% endblock %} 
+{% endblock %}

@@ -414,16 +414,6 @@ Latin American Spanish requires number agreement (singular or plural) for nouns,
 | Physical Power | Poder Físico | masculine | el Poder Físico |
 | Magical Power | Poder Mágico | masculine | el Poder Mágico |
 
-### Numerical Formatting
-
-| English Format | Latin American Spanish Format | Example |
-|----------------|--------------------------------|---------|
-| 1.5 | 1,5 | Use comma as decimal separator |
-| 1,000 | 1.000 | Use period as thousands separator |
-| 50% | 50% | No space before percent sign |
-| 10-50 | 10-50 | No spaces around hyphen in ranges |
-| 5s | 5s | No space between number and unit |
-
 ## Usage Guidelines
 
 ### Gender and Articles
@@ -484,36 +474,3 @@ Use inverted question marks and exclamation marks at the beginning of questions 
 - Use infinitive forms for menu items and buttons
   - Example: "Jugar" (Play)
   - Example: "Confirmar" (Confirm)
-
-## Validation Insights
-
-The validation of these translation rules against the SMITE 2 dataset revealed several key insights:
-
-### Terminology Consistency
-
-- **High consistency (>90%)**: Ability (92.1%), Damage (98.0%), Passive (94.6%), Mana (99.2%)
-- **Good consistency (80-90%)**: Attack (83.4%), God (84.6%), Item (80.6%), Power (84.5%)
-- **Low consistency (<80%)**: Health (3.9% for "Vida"), Cooldown (0% for "Enfriamiento"), Ultimate (65.6%)
-
-### Grammatical Rules
-
-- **Gender agreement**: Excellent consistency (100%)
-- **Capitalization**: Excellent consistency (99.6%)
-- **Punctuation**: Moderate consistency (61.7%)
-- **Accent usage**: Good consistency (87.7%)
-- **Formality level**: Poor consistency (35.7%)
-
-## Priority Improvements
-
-Based on validation findings, these are the key areas for improvement:
-
-1. **Standardize key terminology**: Ensure consistent translations for "Health" (use "Salud" instead of "Vida"), "Cooldown" (use "Tiempo de Reutilización" instead of "Enfriamiento"), and "Ultimate" (maintain "Definitiva")
-2. **Standardize formality level**: Consistently use "tú" form for player instructions (35.7% consistency needs significant improvement)
-3. **Maintain accent usage**: Continue applying proper accents to Spanish words (87.7% consistency is good but can be improved)
-4. **Use standardized abbreviations**: Apply the abbreviations listed in this glossary for UI space constraints
-
-By following this comprehensive ruleset, translators can ensure high-quality, consistent translations of SMITE 2 content from English to Latin American Spanish that will resonate with players across Latin America.
-
-
-
-

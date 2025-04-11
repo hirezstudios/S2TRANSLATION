@@ -1,0 +1,201 @@
+{% extends 'base.html' %}
+
+{% block title %}Admin - Vector Stores{% endblock %}
+
+{% block content %}
+    <h2>Admin - Vector Store Management</h2>
+    <p>Manage sets of language-specific Vector Stores created from full translation files.</p>
+
+    {# Display flashed messages #}
+    {% with messages = get_flashed_messages(with_categories=true) %}
+      {% if messages %}
+        {% for category, message in messages %}
+          <div class="alert alert-{{ category }} alert-dismissible fade show" role="alert">
+            {{ message }}
+            <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
+          </div>
+        {% endfor %}
+      {% endif %}
+    {% endwith %}
+
+    <hr>
+    <h3>Create New Vector Store Set</h3>
+    <form method="post" action="{{ url_for('prepare_vector_stores') }}" enctype="multipart/form-data">
+        <div class="mb-3">
+            <label for="full_translation_csv" class="form-label">Full Translation CSV File</label>
+            <input type="file" class="form-control" id="full_translation_csv" name="full_translation_csv" accept=".csv" required>
+            <div class="form-text">Upload a CSV containing source English and target language columns (e.g., src_enUS, tg_frFR, tg_esLA...).</div>
+        </div>
+        <div class="mb-3">
+            <label for="notes" class="form-label">Notes (Optional)</label>
+            <input type="text" class="form-control" id="notes" name="notes" placeholder="E.g., 'Post-launch V1 translations'">
+        </div>
+        <button type="submit" class="btn btn-primary">Create New Set & Prepare Stores</button>
+        <div class="form-text text-warning">Note: This process runs in the background and can take several minutes per language. The new set will be activated automatically *only if* all language stores are created successfully.</div>
+    </form>
+
+    <hr>
+    <h3>Existing Vector Store Sets</h3>
+    {% if vector_store_sets %}
+        <table class="table table-striped table-sm">
+            <thead>
+                <tr>
+                    <th>Set ID</th>
+                    <th>Created</th>
+                    <th>Source File</th>
+                    <th>Notes</th>
+                    <th>Status</th>
+                    <th>Actions</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for set in vector_store_sets %}
+                <tr data-set-id="{{ set.set_id }}">
+                    <td>{{ set.set_id }}</td>
+                    <td>{{ set.upload_timestamp }}</td>
+                    <td>{{ set.source_csv_filename }}</td>
+                    <td>{{ set.notes }}</td>
+                    {# Display initial overall status #}
+                    <td id="status-cell-{{ set.set_id }}">
+                        <span class="badge bg-secondary">Loading...</span>
+                    </td>
+                    {# Action Buttons - logic needs refinement based on status #}
+                    <td>
+                        {% if set.is_active %}
+                            <button class="btn btn-success btn-sm" disabled>(Currently Active)</button>
+                        {% else %}
+                            {# Disable activate button initially until status is known/complete #}
+                            <form action="{{ url_for('activate_vector_store_set', set_id=set.set_id) }}" method="POST" style="display: inline;">
+                                <button type="submit" class="btn btn-primary btn-sm activate-btn" id="activate-btn-{{ set.set_id }}" disabled>Activate</button>
+                            </form>
+                        {% endif %}
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    {% else %}
+        <p>No Vector Store Sets found in the database.</p>
+    {% endif %}
+
+{% endblock %}
+
+{% block scripts %}
+<script>
+document.addEventListener('DOMContentLoaded', function() {
+    const statusCells = document.querySelectorAll('[id^="status-cell-"]');
+    const activeIntervals = {};
+
+    function updateStatus(setId) {
+        const statusCell = document.getElementById(`status-cell-${setId}`);
+        const activateBtn = document.getElementById(`activate-btn-${setId}`);
+        
+        if (!statusCell) return; // Stop if cell disappears (e.g., page navigation)
+
+        fetch(`/admin/set_status/${setId}`)
+            .then(response => {
+                if (!response.ok) {
+                    throw new Error(`HTTP error! Status: ${response.status}`);
+                }
+                return response.json();
+            })
+            .then(data => {
+                let statusHtml = '';
+                let statusText = data.status || 'Error';
+                let isActive = data.is_active === 1;
+
+                // Determine badge color and content
+                if (statusText.startsWith('Processing')) {
+                    statusHtml = `<span class="badge bg-info"><span class="spinner-border spinner-border-sm" role="status" aria-hidden="true"></span> ${statusText}</span>`;
+                } else if (statusText === 'Completed') {
+                    statusHtml = `<span class="badge bg-success">${statusText}</span>`;
+                    // Stop polling for this set
+                    if (activeIntervals[setId]) {
+                        clearInterval(activeIntervals[setId]);
+                        delete activeIntervals[setId];
+                    }
+                } else if (statusText.startsWith('Failed')) {
+                    statusHtml = `<span class="badge bg-danger">${statusText}</span>`;
+                    if (activeIntervals[setId]) {
+                        clearInterval(activeIntervals[setId]);
+                        delete activeIntervals[setId];
+                    }
+                } else if (statusText === 'Pending') {
+                    statusHtml = `<span class="badge bg-warning text-dark">${statusText}</span>`;
+                } else { // No Mappings, Error, Unknown
+                    statusHtml = `<span class="badge bg-secondary">${statusText}</span>`;
+                     if (activeIntervals[setId]) { // Stop polling for errors too
+                        clearInterval(activeIntervals[setId]);
+                        delete activeIntervals[setId];
+                    }
+                }
+                
+                statusCell.innerHTML = statusHtml;
+
+                // Update Action Button based on status
+                const actionCell = statusCell.nextElementSibling; // Assumes Action is next cell
+                if (actionCell) {
+                    if (isActive) {
+                         actionCell.innerHTML = `<button class="btn btn-success btn-sm" disabled>(Currently Active)</button>`;
+                    } else if (statusText === 'Completed') {
+                        // Re-enable activate button ONLY if completed and not active
+                        actionCell.innerHTML = `
+                            <form action="{{ url_for('activate_vector_store_set', set_id=0) }}".replace('0', setId) method="POST" style="display: inline;">
+                                <button type="submit" class="btn btn-primary btn-sm activate-btn" id="activate-btn-${setId}">Activate</button>
+                            </form>`;
+                    } else {
+                        // Keep button disabled for Pending, Processing, Failed, etc.
+                         if (activateBtn) {
+                            activateBtn.disabled = true;
+                            // Maybe change text? For now, just keep it disabled.
+                            // Keep existing structure if not completed/inactive
+                            if (!actionCell.querySelector('.activate-btn')) {
+                                // Re-add disabled button structure if it got replaced somehow
+                                 actionCell.innerHTML = `
+                                    <form action="{{ url_for('activate_vector_store_set', set_id=0) }}".replace('0', setId) method="POST" style="display: inline;">
+                                        <button type="submit" class="btn btn-primary btn-sm activate-btn" id="activate-btn-${setId}" disabled>Activate</button>
+                                    </form>`;
+                            }
+                         }
+                    }
+                }
+
+            })
+            .catch(error => {
+                console.error('Error fetching status:', error);
+                statusCell.innerHTML = `<span class="badge bg-danger">Error Fetching</span>`;
+                 // Stop polling on fetch error
+                 if (activeIntervals[setId]) {
+                    clearInterval(activeIntervals[setId]);
+                    delete activeIntervals[setId];
+                }
+            });
+    }
+
+    statusCells.forEach(cell => {
+        const row = cell.closest('tr');
+        const setId = row.getAttribute('data-set-id');
+        if (setId) {
+            // Initial fetch
+            updateStatus(setId);
+            
+            // Start polling ONLY IF the initial status isn't terminal (Completed/Failed)
+            // Check initial state after first fetch (requires slight delay or checking inside fetch)
+            // Let's refine: Start polling immediately, fetch logic will clear interval.
+            if (!activeIntervals[setId]) { // Avoid multiple intervals for same ID
+                activeIntervals[setId] = setInterval(() => updateStatus(setId), 5000); // Poll every 5 seconds
+            }
+        }
+    });
+
+    // Optional: Add confirmation to Activate button
+    document.body.addEventListener('submit', function(event) {
+        if (event.target.querySelector('.activate-btn')) {
+            if (!confirm('Are you sure you want to activate this Vector Store Set? This will deactivate any other active set.')) {
+                event.preventDefault();
+            }
+        }
+    });
+});
+</script>
+{% endblock %} 

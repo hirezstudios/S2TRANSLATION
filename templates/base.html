@@ -22,6 +22,7 @@
                 <li class="nav-item"><a href="{{ url_for('index') }}" class="nav-link {% if request.endpoint == 'index' %}active{% endif %}" aria-current="page">Home</a></li>
                 <li class="nav-item"><a href="{{ url_for('batch_history') }}" class="nav-link {% if request.endpoint == 'batch_history' %}active{% endif %}">Batch History</a></li>
                 <li class="nav-item"><a href="{{ url_for('list_rules') }}" class="nav-link {% if request.endpoint == 'list_rules' %}active{% endif %}">Rules</a></li>
+                <li class="nav-item"><a href="{{ url_for('admin_page') }}" class="nav-link {% if request.endpoint == 'admin_page' %}active{% endif %}">Admin</a></li>
                 <!-- <li class="nav-item"><a href="#" class="nav-link">FAQs</a></li> -->
                 <!-- <li class="nav-item"><a href="#" class="nav-link">About</a></li> -->
             </ul>

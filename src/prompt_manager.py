@@ -2,6 +2,8 @@ import os
 import glob
 from . import config
 import logging
+import re
+from typing import Optional, Dict, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -12,6 +14,7 @@ global_rules_content = None
 stage1_templates = {}
 stage2_template_prompt = None
 stage3_template_prompt = None
+stage0_template_prompt = None
 available_languages = []
 
 def discover_available_languages():
@@ -91,8 +94,8 @@ def load_single_prompt_file(system_filepath):
         return None
 
 def load_prompts():
-    """Loads global rules, language-specific stage 1 bases, and stage 2/3 templates."""
-    global global_rules_content, stage1_templates, stage2_template_prompt, stage3_template_prompt, available_languages
+    """Loads global rules, language-specific stage 1 bases, and stage templates."""
+    global global_rules_content, stage1_templates, stage2_template_prompt, stage3_template_prompt, stage0_template_prompt, available_languages
 
     logger.info("Discovering available languages based on system prompts...")
     discover_available_languages() # Based on system_prompts/
@@ -123,60 +126,151 @@ def load_prompts():
     if not stage1_templates:
          logger.warning("No Stage 1 prompts could be loaded for any discovered language.")
             
-    if config.TRANSLATION_MODE == "THREE_STAGE":
-        logger.info(f"Loading Stage 2 Template (checking user override for {os.path.basename(config.STAGE2_TEMPLATE_FILE)})...")
-        stage2_template_prompt = load_single_prompt_file(config.STAGE2_TEMPLATE_FILE)
-        if not stage2_template_prompt:
-             logger.error(f"Critical Error: Stage 2 template {config.STAGE2_TEMPLATE_FILE} missing in both system/user paths for THREE_STAGE mode. Exiting.")
-             exit(1)
-             
-        logger.info(f"Loading Stage 3 Template (checking user override for {os.path.basename(config.STAGE3_TEMPLATE_FILE)})...")
-        stage3_template_prompt = load_single_prompt_file(config.STAGE3_TEMPLATE_FILE)
-        if not stage3_template_prompt:
-             logger.error(f"Critical Error: Stage 3 template {config.STAGE3_TEMPLATE_FILE} missing in both system/user paths for THREE_STAGE mode. Exiting.")
-             exit(1)
+    # Load Stage 0 Template
+    logger.info(f"Loading Stage 0 Template (checking user override for {os.path.basename(config.STAGE0_TEMPLATE_FILE)})...")
+    stage0_template_prompt = load_single_prompt_file(config.STAGE0_TEMPLATE_FILE)
+    if not stage0_template_prompt:
+         logger.error(f"CRITICAL WARNING: Stage 0 template {config.STAGE0_TEMPLATE_FILE} missing in system/user paths. FOUR_STAGE mode will fail.")
+
+    # Load Stage 2 & 3 only if needed (or always? Let's keep existing logic)
+    # Original logic checked config.TRANSLATION_MODE, but now we support multiple modes.
+    # Let's load S2/S3 always if their files exist, error checking happens in get_full_prompt if needed.
+    logger.info(f"Loading Stage 2 Template (checking user override for {os.path.basename(config.STAGE2_TEMPLATE_FILE)})...")
+    stage2_template_prompt = load_single_prompt_file(config.STAGE2_TEMPLATE_FILE)
+    if not stage2_template_prompt:
+            logger.warning(f"Stage 2 template {config.STAGE2_TEMPLATE_FILE} missing. THREE/FOUR stage modes may fail if S2 is required.")
+            
+    logger.info(f"Loading Stage 3 Template (checking user override for {os.path.basename(config.STAGE3_TEMPLATE_FILE)})...")
+    stage3_template_prompt = load_single_prompt_file(config.STAGE3_TEMPLATE_FILE)
+    if not stage3_template_prompt:
+            logger.warning(f"Stage 3 template {config.STAGE3_TEMPLATE_FILE} missing. THREE/FOUR stage modes may fail if S3 refinement is needed.")
              
     logger.info("Prompt loading complete.")
 
-def get_full_prompt(stage, lang_code, source_text=None, initial_translation=None, feedback=None):
+def get_full_prompt(
+    prompt_type: str,
+    language_code: str,
+    base_variables: Optional[Dict[str, str]] = None,
+    stage_variables: Optional[Dict[str, str]] = None,
+    batch_prompt: Optional[str] = None,
+    generated_glossary: Optional[str] = None
+) -> Optional[str]:
     """Constructs the full system prompt for a given stage and language."""
     
-    # Final instruction (applied to all stages)
+    # Final instruction (applied to stages 1, 2, 3)
     final_instruction = "\n\n**IMPORTANT FINAL INSTRUCTION: Your final output should contain ONLY the final text (translation/evaluation/revision). No extra text, formatting, or explanations.**"
     
-    # Get base language rules
-    lang_specific_part = stage1_templates.get(lang_code)
+    # --- Common Setup: Batch Prompt, Language Rules, Global Rules --- 
+    batch_prompt_section = ""
+    if batch_prompt and batch_prompt.strip():
+        batch_prompt_section = f"**BATCH-SPECIFIC INSTRUCTIONS:**\n{batch_prompt.strip()}\n---\n\n"
+    
+    lang_specific_part = stage1_templates.get(language_code)
     if not lang_specific_part:
-        raise ValueError(f"Language specific prompt for {lang_code} not loaded.")
-    lang_name = config.LANGUAGE_NAME_MAP.get(lang_code, lang_code)
+        raise ValueError(f"Language specific prompt for {language_code} not loaded.")
+    lang_name = config.LANGUAGE_NAME_MAP.get(language_code, language_code)
     lang_specific_part = lang_specific_part.replace("<<TARGET_LANGUAGE_NAME>>", lang_name)
         
-    full_ruleset = f"{lang_specific_part}\n\n{global_rules_content}"
+    standard_ruleset = f"{batch_prompt_section}{lang_specific_part}\n\n{global_rules_content}"
+    # -------------------------------------------------------------------
 
-    if stage == 1:
-        return full_ruleset + final_instruction
-    
-    elif stage == 2:
-        if not stage2_template_prompt:
-            raise ValueError("Stage 2 template not loaded.")
-        prompt = stage2_template_prompt.replace("<<TARGET_LANGUAGE_NAME>>", lang_name)\
-                                       .replace("<<RULES>>", full_ruleset)\
-                                       .replace("<<SOURCE_TEXT>>", source_text or "")\
-                                       .replace("<<INITIAL_TRANSLATION>>", initial_translation or "")
-        return prompt + final_instruction
+    # --- Prompt Type Specific Logic --- 
+    if prompt_type == "0":
+        if not stage0_template_prompt:
+             raise ValueError("Stage 0 template (stage0_glossary_template.md) not loaded.")
+        # Format S0 instructions
+        stage0_instructions = stage0_template_prompt.replace("<<TARGET_LANGUAGE_NAME>>", lang_name)
+        # Combine S0 instructions with standard rules
+        combined_s0_prompt = f"{stage0_instructions}\n\n**GENERAL TRANSLATION RULES (Apply these when generating glossary):**\n---\n{standard_ruleset}"
+        return combined_s0_prompt # Return combined prompt without final_instruction
+
+    else: # Handle stages 1, 2, 3
+        # <<< START TEMP LOGGING >>>
+        logger.debug(f"get_full_prompt (Type {prompt_type}, Lang {language_code}): Received generated_glossary (len={len(generated_glossary) if generated_glossary else 0})")
+        # logger.debug(f"Received Glossary Content:\n{generated_glossary}") # Uncomment for full content
+        # <<< END TEMP LOGGING >>>
         
-    elif stage == 3:
-        if not stage3_template_prompt:
-            raise ValueError("Stage 3 template not loaded.")
-        prompt = stage3_template_prompt.replace("<<TARGET_LANGUAGE_NAME>>", lang_name)\
-                                       .replace("<<RULES>>", full_ruleset)\
-                                       .replace("<<SOURCE_TEXT>>", source_text or "")\
-                                       .replace("<<INITIAL_TRANSLATION>>", initial_translation or "")\
-                                       .replace("<<FEEDBACK>>", feedback or "")
-        return prompt + final_instruction
+        # Prepend generated glossary if available
+        glossary_section = ""
+        if generated_glossary and generated_glossary.strip():
+            glossary_section = f"**GENERATED GLOSSARY (From Stage 0):**\n{generated_glossary.strip()}\n---\n\n"
         
-    else:
-        raise ValueError(f"Invalid stage number: {stage}")
+        # Combine Glossary + Standard Rules for S1/S2/S3 context
+        full_ruleset_with_glossary = f"{glossary_section}{standard_ruleset}"
+        
+        # <<< START TEMP LOGGING >>>
+        logger.debug(f"get_full_prompt (Type {prompt_type}, Lang {language_code}): Constructed full_ruleset_with_glossary (len={len(full_ruleset_with_glossary)}). Starts with: {full_ruleset_with_glossary[:100]}...")
+        # logger.debug(f"Full Ruleset Content:\n{full_ruleset_with_glossary}") # Uncomment for full content
+        # <<< END TEMP LOGGING >>>
+
+        if prompt_type == "1":
+            # Stage 1: Ruleset + Final Instruction
+            return full_ruleset_with_glossary + final_instruction
+        
+        elif prompt_type == "2":
+            # Stage 2: Template using Ruleset + Base Variables + Final Instruction
+            if not stage2_template_prompt:
+                raise ValueError("Stage 2 template not loaded.")
+            prompt = stage2_template_prompt.replace("<<TARGET_LANGUAGE_NAME>>", lang_name)\
+                                           .replace("<<RULES>>", full_ruleset_with_glossary)\
+                                           .replace("<<SOURCE_TEXT>>", base_variables.get('source_text') or "")\
+                                           .replace("<<INITIAL_TRANSLATION>>", base_variables.get('initial_translation') or "")
+            return prompt + final_instruction
+            
+        elif prompt_type == "3":
+            # Stage 3: Template using Ruleset + Base Variables + Stage Variables + Final Instruction
+            if not stage3_template_prompt:
+                raise ValueError("Stage 3 template not loaded.")
+            prompt = stage3_template_prompt.replace("<<TARGET_LANGUAGE_NAME>>", lang_name)\
+                                           .replace("<<RULES>>", full_ruleset_with_glossary)\
+                                           .replace("<<SOURCE_TEXT>>", base_variables.get('source_text') or "")\
+                                           .replace("<<INITIAL_TRANSLATION>>", base_variables.get('initial_translation') or "")\
+                                           .replace("<<FEEDBACK>>", stage_variables.get('feedback') or "")
+            return prompt + final_instruction
+            
+        else:
+            raise ValueError(f"Invalid prompt type: {prompt_type}")
+
+def parse_evaluation(evaluation_text: str) -> Tuple[Optional[int], Optional[str]]:
+    """
+    Parses the evaluation text from the LLM to extract the score and feedback.
+
+    Assumes a format like:
+    Score: [number]
+    Feedback: [text]
+
+    Args:
+        evaluation_text: The raw text output from the evaluation LLM call.
+
+    Returns:
+        A tuple containing (score, feedback). Score is an int, feedback is a string.
+        Returns (None, None) if parsing fails.
+    """
+    if not evaluation_text:
+        return None, None
+
+    score_match = re.search(r"Score:\s*(\d+)", evaluation_text, re.IGNORECASE)
+    feedback_match = re.search(r"Feedback:\s*(.*)", evaluation_text, re.IGNORECASE | re.DOTALL) # DOTALL allows feedback to span multiple lines
+
+    score = int(score_match.group(1)) if score_match else None
+    feedback = feedback_match.group(1).strip() if feedback_match else None
+
+    # Basic validation or fallback if only one part is found?
+    # For now, return what's found. If score is missing, it implies failure.
+    if score is None and feedback is None:
+        logger.warning(f"Could not parse score or feedback from evaluation text: {evaluation_text[:100]}...")
+        # Fallback: return the original text as feedback if nothing else is found
+        feedback = evaluation_text.strip()
+
+    elif score is None:
+         logger.warning(f"Could not parse score from evaluation text: {evaluation_text[:100]}...")
+    elif feedback is None:
+        logger.warning(f"Could not parse feedback from evaluation text: {evaluation_text[:100]}...")
+        # If score is present but feedback isn't, maybe just return the score?
+        # Or return the original text as feedback? Let's return original for now.
+        feedback = evaluation_text.strip()
+
+    return score, feedback
 
 # Load prompts when module is imported
 load_prompts() 

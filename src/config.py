@@ -37,18 +37,20 @@ AUDIT_LOG_FILE = os.getenv("AUDIT_LOG_FILE", f"output/audit_log_{LANGUAGE_CODE}_
 STAGE1_API = os.getenv("STAGE1_API", DEFAULT_API).split('#')[0].strip().strip('"').strip("'").upper()
 STAGE2_API = os.getenv("STAGE2_API", DEFAULT_API).split('#')[0].strip().strip('"').strip("'").upper()
 STAGE3_API = os.getenv("STAGE3_API", DEFAULT_API).split('#')[0].strip().strip('"').strip("'").upper()
-STAGE1_MODEL_OVERRIDE = os.getenv("STAGE1_MODEL", "").split('#')[0].strip().strip('"').strip("'") or None
-STAGE2_MODEL_OVERRIDE = os.getenv("STAGE2_MODEL", "").split('#')[0].strip().strip('"').strip("'") or None
-STAGE3_MODEL_OVERRIDE = os.getenv("STAGE3_MODEL", "").split('#')[0].strip().strip('"').strip("'") or None
+STAGE1_MODEL_OVERRIDE = os.getenv("STAGE1_MODEL")
+STAGE2_MODEL_OVERRIDE = os.getenv("STAGE2_MODEL")
+STAGE3_MODEL_OVERRIDE = os.getenv("STAGE3_MODEL")
+S0_MODEL = os.getenv("S0_MODEL", "gpt-4o") # Default to gpt-4o if not set
 STAGE1_PROMPT_FILE_TPL = "system_prompts/tg_{lang_code}.md" # Template path
 STAGE2_TEMPLATE_FILE = "system_prompts/stage2_evaluate_template.md" 
 STAGE3_TEMPLATE_FILE = "system_prompts/stage3_refine_template.md" 
 STAGE4_TEMPLATE_FILE = "system_prompts/stage4_retranslate_template.md"
+STAGE0_TEMPLATE_FILE = "system_prompts/stage0_glossary_template.md"
 
 # --- CSV/DB Configuration ---
 INPUT_CSV_DIR = "input/" # Base directory for inputs
 OUTPUT_DIR = "output/" # Base directory for outputs
-DATABASE_FILE = os.getenv("DATABASE_FILE", "output/translation_jobs.db").split('#')[0].strip().strip('"').strip("'")
+DATABASE_FILE = os.getenv("DATABASE_FILE", "database.db").split('#')[0].strip().strip('"').strip("'")
 SOURCE_COLUMN = "src_enUS"
 TARGET_COLUMN_TPL = "tg_{lang_code}"
 
@@ -85,8 +87,15 @@ for api in all_apis:
 
 # Ensure output/archive directories exist
 os.makedirs(OUTPUT_DIR, exist_ok=True)
-os.makedirs(os.path.dirname(DATABASE_FILE), exist_ok=True) # Ensure DB directory exists
+db_dir = os.path.dirname(DATABASE_FILE)
+if db_dir:
+    os.makedirs(db_dir, exist_ok=True)
 os.makedirs(SYSTEM_PROMPT_DIR, exist_ok=True) # Ensure system prompt dir exists
 os.makedirs(ARCHIVE_DIR, exist_ok=True)
+
+# --- Vector Store Configuration ---
+UPLOAD_FOLDER = "uploads" # Folder to store uploaded CSVs temporarily or permanently
+# Flag to enable/disable vector store assistance feature globally or by default
+USE_VECTOR_STORE_ASSISTANCE = os.getenv("USE_VECTOR_STORE_ASSISTANCE", "False").split('#')[0].strip().strip('"').strip("'").lower() == 'true'
 
 print("Config loaded.") 

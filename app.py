@@ -9,6 +9,11 @@ import pandas as pd # Make sure pandas is imported
 import glob # Added for rule file scanning
 from datetime import datetime # Added for archiving
 import re # Added for parsing tg_ filenames
+import sys # Add sys import
+
+# --- Add project root to sys.path --- #
+sys.path.insert(0, os.path.abspath(os.path.dirname(__file__)))
+# ------------------------------------ #
 
 # Import backend modules
 from src import config
@@ -16,6 +21,7 @@ from src import db_manager
 from src import translation_service
 from src import prompt_manager
 from src import api_clients
+from src import vector_store_manager # Now actually used
 
 # Configure logging
 logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(name)s - %(message)s') # Changed level to DEBUG
@@ -25,6 +31,7 @@ logger = logging.getLogger(__name__)
 logging.getLogger('src.translation_service').setLevel(logging.DEBUG)
 logging.getLogger('src.db_manager').setLevel(logging.DEBUG)
 logging.getLogger('src.prompt_manager').setLevel(logging.INFO) # Set prompt_manager to INFO for less noise
+logging.getLogger('src.vector_store_manager').setLevel(logging.INFO) # Add level for vector store manager
 logger.info("Log levels configured.")
 # --- End Explicit level setting --- #
 
@@ -33,6 +40,11 @@ SYSTEM_PROMPT_DIR = config.SYSTEM_PROMPT_DIR # Use path from config
 SYSTEM_ARCHIVE_DIR = config.ARCHIVE_DIR # Use path from config
 USER_PROMPT_DIR = "user_prompts"
 USER_ARCHIVE_DIR = os.path.join(USER_PROMPT_DIR, "archive")
+
+# --- Constants for Admin Vector Store feature ---
+ALLOWED_EXTENSIONS = {'csv'}
+UPLOAD_FOLDER = config.UPLOAD_FOLDER
+SOURCE_COLUMN_NAME = "src_enUS" # Define the expected source column name
 
 # --- Helper function to get rule files status ---
 def get_rule_files():
@@ -128,11 +140,140 @@ def get_rule_files():
 
     return sorted_rule_files
 
+# --- Helper for file uploads ---
+def allowed_file(filename):
+    return '.' in filename and \
+           filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
+# -----------------------------
+
+# --- Background Processing Function for Vector Stores --- #
+def _process_vector_store_set_background(app_context, set_id, csv_path):
+    """Processes a CSV file to create OpenAI vector stores in a background thread."""
+    with app_context:
+        logger = logging.getLogger(__name__) # Get logger within app context
+        logger.info(f"[BG Task Set {set_id}] Starting background processing for {csv_path}")
+        final_statuses = {}
+
+        try:
+            # 1. Get mappings for this set_id
+            mappings = db_manager.get_mappings_for_set(config.DATABASE_FILE, set_id)
+            if mappings is None:
+                logger.error(f"[BG Task Set {set_id}] Failed to retrieve mappings from database. Aborting.")
+                return
+            if not mappings:
+                logger.warning(f"[BG Task Set {set_id}] No mappings found for this set. Nothing to process.")
+                return
+
+            logger.info(f"[BG Task Set {set_id}] Found {len(mappings)} mappings to process.")
+
+            # 2. Check CSV header columns (Source + all Target columns from mappings)
+            try:
+                 df_cols = pd.read_csv(csv_path, nrows=0).columns
+                 if SOURCE_COLUMN_NAME not in df_cols:
+                     logger.error(f"[BG Task Set {set_id}] Source column '{SOURCE_COLUMN_NAME}' not found in {csv_path}. Aborting.")
+                     for mapping in mappings:
+                         if mapping['status'] == 'pending':
+                            db_manager.update_mapping_status(config.DATABASE_FILE, mapping['mapping_id'], 'failed')
+                            final_statuses[mapping['language_code']] = 'failed (Missing Source Col)'
+                     return # Exit thread - no point continuing
+                 
+                 mapping_target_cols = {m['column_name'] for m in mappings}
+                 missing_targets = mapping_target_cols - set(df_cols)
+                 if missing_targets:
+                     logger.error(f"[BG Task Set {set_id}] Target column(s) {missing_targets} from mappings not found in {csv_path}. Failing affected mappings.")
+                     for mapping in mappings:
+                         if mapping['column_name'] in missing_targets and mapping['status'] == 'pending':
+                             db_manager.update_mapping_status(config.DATABASE_FILE, mapping['mapping_id'], 'failed')
+                             final_statuses[mapping['language_code']] = 'failed (Missing Target Col)'
+                     # Continue processing other valid mappings
+            except Exception as e:
+                logger.exception(f"[BG Task Set {set_id}] Error reading CSV columns from {csv_path}: {e}. Aborting.")
+                for mapping in mappings:
+                     if mapping['status'] == 'pending':
+                         db_manager.update_mapping_status(config.DATABASE_FILE, mapping['mapping_id'], 'failed')
+                         final_statuses[mapping['language_code']] = 'failed (CSV Read Error)'
+                return # Exit thread
+
+            # 3. Process each mapping
+            for mapping in mappings:
+                # Skip if failed during header check or already processed in a previous run (if applicable)
+                if mapping['status'] != 'pending':
+                    logger.info(f"[BG Task Set {set_id}/Map {mapping['mapping_id']}] Skipping mapping for {mapping['language_code']} (status: {mapping['status']})")
+                    if mapping['status'] != 'completed': # Update final status if skipped but not complete
+                        final_statuses[mapping['language_code']] = mapping['status']
+                    continue
+                    
+                mapping_id = mapping['mapping_id']
+                lang_code = mapping['language_code']
+                col_name = mapping['column_name']
+                logger.info(f"[BG Task Set {set_id}/Map {mapping_id}] Processing mapping for {lang_code} ({col_name})")
+
+                # Update status to 'processing'
+                db_manager.update_mapping_status(config.DATABASE_FILE, mapping_id, 'processing')
+
+                # Call the OpenAI vector store creation function
+                result_ids = vector_store_manager.create_openai_vector_store_for_language(
+                    csv_path=csv_path,
+                    source_column=SOURCE_COLUMN_NAME,
+                    target_column=col_name,
+                    language_code=lang_code,
+                    set_id=set_id,
+                    mapping_id=mapping_id
+                )
+
+                # Update status based on result
+                if result_ids:
+                    openai_vs_id, openai_file_id = result_ids
+                    db_manager.update_mapping_status(config.DATABASE_FILE, mapping_id, 'completed', openai_vs_id=openai_vs_id, openai_file_id=openai_file_id)
+                    final_statuses[lang_code] = 'completed'
+                    logger.info(f"[BG Task Set {set_id}/Map {mapping_id}] Completed processing for {lang_code}")
+                else:
+                    # The create function handles logging the error, just update status
+                    db_manager.update_mapping_status(config.DATABASE_FILE, mapping_id, 'failed')
+                    final_statuses[lang_code] = 'failed'
+                    logger.error(f"[BG Task Set {set_id}/Map {mapping_id}] Failed processing for {lang_code}")
+                    # Continue processing other mappings
+
+            # 4. Check overall success and activate if needed
+            # Re-fetch mappings to get final statuses after loop
+            final_mappings = db_manager.get_mappings_for_set(config.DATABASE_FILE, set_id)
+            all_successful = False # Default to false
+            if final_mappings:
+                 all_successful = all(m['status'] == 'completed' for m in final_mappings)
+                 if not final_mappings: # Double check if list is empty
+                     all_successful = False 
+                     logger.warning(f"[BG Task Set {set_id}] No mappings found after processing loop; set will not be activated.")
+            else: 
+                 logger.warning(f"[BG Task Set {set_id}] Failed to fetch final mappings; set will not be activated.")
+
+            logger.info(f"[BG Task Set {set_id}] Finished processing mappings. Overall success: {all_successful}. Final statuses: {final_statuses}")
+            if all_successful:
+                logger.info(f"[BG Task Set {set_id}] All mappings completed successfully. Activating set.")
+                activated = db_manager.activate_set(config.DATABASE_FILE, set_id)
+                if activated:
+                    logger.info(f"[BG Task Set {set_id}] Successfully activated.")
+                else:
+                    logger.error(f"[BG Task Set {set_id}] Failed to activate set after successful mapping completion.")
+            else:
+                logger.warning(f"[BG Task Set {set_id}] Not all mappings completed successfully. Set will remain inactive.")
+
+        except Exception as e:
+            logger.exception(f"[BG Task Set {set_id}] Unexpected error during background processing for {csv_path}: {e}")
+            # Attempt to mark remaining pending/processing mappings as failed
+            try:
+                current_mappings = db_manager.get_mappings_for_set(config.DATABASE_FILE, set_id)
+                if current_mappings:
+                    for mapping in current_mappings:
+                        if mapping['status'] in ['pending', 'processing']:
+                            db_manager.update_mapping_status(config.DATABASE_FILE, mapping['mapping_id'], 'failed')
+            except Exception as db_e:
+                 logger.exception(f"[BG Task Set {set_id}] Error trying to mark mappings as failed during cleanup: {db_e}")
 
 # --- Flask App Setup ---
 def create_app():
     app = Flask(__name__)
     app.config["SECRET_KEY"] = os.urandom(24) # Needed for session/flash
+    app.config['UPLOAD_FOLDER'] = 'uploads' # Define upload folder config
     
     # Ensure necessary directories exist
     os.makedirs(config.OUTPUT_DIR, exist_ok=True)
@@ -140,6 +281,7 @@ def create_app():
     # os.makedirs(ARCHIVE_DIR, exist_ok=True) # Use constant - System archive handled via config?
     # Let's explicitly ensure User archive dir exists on startup too
     os.makedirs(USER_ARCHIVE_DIR, exist_ok=True)
+    os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True) # Ensure upload folder exists
     db_manager.initialize_database(config.DATABASE_FILE)
     prompt_manager.load_prompts()
 
@@ -225,7 +367,7 @@ def create_app():
             
             # Get form data
             selected_languages = request.form.getlist('languages') # Assuming name="languages"
-            mode = request.form.get('mode', config.TRANSLATION_MODE) # Default to config if not provided
+            mode = request.form.get('mode', 'THREE_STAGE') # Default to THREE_STAGE if not provided
             one_stage_api = request.form.get('one_stage_api', config.DEFAULT_API)
             one_stage_model = request.form.get('one_stage_model') or None 
             s1_api = request.form.get('s1_api', config.STAGE1_API)
@@ -234,8 +376,13 @@ def create_app():
             s2_model = request.form.get('s2_model') or None
             s3_api = request.form.get('s3_api', config.STAGE3_API)
             s3_model = request.form.get('s3_model') or None
+            # Get Vector Store preference
+            use_vs = True if mode == 'FOUR_STAGE' else request.form.get('use_vector_store') == 'true' # Checkbox value is 'true' when checked
+            # --- NEW: Get Batch Prompt ---
+            batch_prompt_text = request.form.get('batch_prompt', '').strip()
+            # -----------------------------
             
-            logger.info(f"Form Data Received - Mode: {mode}, Languages: {selected_languages}")
+            logger.info(f"Form Data Received - Mode: {mode}, Languages: {selected_languages}, Use VS: {use_vs}")
             if not selected_languages:
                  return jsonify({"error": "No languages selected"}), 400
 
@@ -256,6 +403,8 @@ def create_app():
                     "s1_api": one_stage_api, "s1_model": one_stage_model,
                     "s2_api": None, "s2_model": None,
                     "s3_api": None, "s3_model": None,
+                    "use_vs": use_vs, # Add VS preference
+                    "batch_prompt": batch_prompt_text # --- ADD BATCH PROMPT --- 
                  }
             elif mode == "THREE_STAGE":
                  mode_config = {
@@ -268,14 +417,36 @@ def create_app():
                     "s1_model": s1_model, 
                     "s2_model": s2_model,
                     "s3_model": s3_model,
+                    "use_vs": use_vs, # Add VS preference
+                    "batch_prompt": batch_prompt_text # --- ADD BATCH PROMPT --- 
                 }
+            elif mode == "FOUR_STAGE":
+                mode_config = {
+                    "mode": mode,
+                    "languages": selected_languages,
+                    "use_vs": use_vs,
+                    "batch_prompt": batch_prompt_text
+                }
+                mode_config['s0_api'] = 'OPENAI'
+                mode_config['s0_model'] = request.form.get('s0_model', config.S0_MODEL) or config.S0_MODEL
+                mode_config['s1_api'] = request.form.get('s1_api_four', config.STAGE1_API)
+                mode_config['s1_model'] = request.form.get('s1_model_four') or None
+                mode_config['s2_api'] = request.form.get('s2_api_four', config.STAGE2_API)
+                mode_config['s2_model'] = request.form.get('s2_model_four') or None
+                mode_config['s3_api'] = request.form.get('s3_api_four', config.STAGE3_API)
+                mode_config['s3_model'] = request.form.get('s3_model_four') or None
             else:
                 logger.error(f"Invalid mode received: {mode}")
                 return jsonify({"error": "Invalid translation mode selected"}), 400
             
             # Call backend prepare_batch
             # Pass the actual filename for storage, but use temp path for processing
-            batch_id = translation_service.prepare_batch(file_path, filename, selected_languages, mode_config)
+            batch_id = translation_service.prepare_batch(
+                 input_file_path=file_path, 
+                 original_filename=filename,
+                 selected_languages=selected_languages, 
+                 mode_config=mode_config # Pass the config including batch_prompt
+            )
 
             if batch_id:
                 logger.info(f"Batch {batch_id} prepared. Starting background thread...")
@@ -376,47 +547,44 @@ def create_app():
             logger.exception(f"Error during export for batch {batch_id}: {e}") # Use exception
             return jsonify({"error": "An unexpected error occurred during export."}), 500
             
-    @app.route('/export_stages/<batch_id>')
+    @app.route('/export_stages_report/<batch_id>')
     def export_stages_report(batch_id):
-        """Generates and returns the detailed stages CSV report."""
-        logger.info(f"Received stages report export request for batch {batch_id}")
+        """Generates and serves the detailed stages report CSV."""
+        logger.info(f"Received request to export stages report for batch: {batch_id}")
         db_path = config.DATABASE_FILE
+        
+        # Verify batch exists and mode is appropriate
+        batch_info = db_manager.get_batch_info(db_path, batch_id)
+        if not batch_info:
+            return jsonify({"error": "Batch not found"}), 404
         try:
-            # Check batch exists and was THREE_STAGE
-            batch_info = db_manager.get_batch_info(db_path, batch_id)
-            if not batch_info:
-                return jsonify({"error": "Batch not found"}), 404
-            if batch_info['config_details']:
-                 try:
-                     batch_config = json.loads(batch_info['config_details'])
-                     if batch_config.get('mode') != 'THREE_STAGE':
-                         return jsonify({"error": "Stages report only available for THREE_STAGE batches"}), 400
-                 except Exception:
-                     pass # Ignore config parsing error here, generate_stages_report will handle it
-            
-            # Define report filename
-            original_filename = batch_info['upload_filename'] or "unknown_file.csv"
-            base_name = os.path.splitext(original_filename)[0]
-            report_filename = f"stages_report_{base_name}_batch_{batch_id[:8]}.csv"
-            report_file_path = os.path.join(config.OUTPUT_DIR, report_filename)
-            
-            # Ensure output directory exists
-            os.makedirs(config.OUTPUT_DIR, exist_ok=True)
-            
-            success = translation_service.generate_stages_report(batch_id, report_file_path)
-
-            if success and os.path.exists(report_file_path):
-                abs_report_path = os.path.abspath(report_file_path)
-                logger.info(f"Sending stages report file: {abs_report_path}")
-                return send_file(abs_report_path, as_attachment=True, download_name=report_filename)
-            else:
-                 # generate_stages_report logs specific errors
-                 return jsonify({"error": "Failed to generate stages report file."}), 500
-
+            batch_config = json.loads(batch_info['config_details'] or '{}')
+            mode = batch_config.get('mode')
+            if mode not in ['THREE_STAGE', 'FOUR_STAGE']:
+                logger.warning(f"Stages report requested for batch {batch_id} with mode {mode}, which is not supported.")
+                return jsonify({"error": "Stages report only available for THREE_STAGE or FOUR_STAGE batches"}), 400
         except Exception as e:
-            logger.exception(f"Error during stages report export for batch {batch_id}: {e}")
-            return jsonify({"error": "An unexpected error occurred during stages report export."}), 500
-            
+            logger.error(f"Error reading batch config for {batch_id} during stages export: {e}")
+            return jsonify({"error": "Failed to read batch configuration"}), 500
+
+        # Define output path
+        output_dir = config.OUTPUT_DIR
+        safe_batch_id = batch_id.replace("-", "")[:8] # Short, safe ID for filename
+        original_filename = batch_info['upload_filename']
+        filename_base = os.path.splitext(original_filename)[0]
+        output_filename = f"{filename_base}_batch_{safe_batch_id}_STAGES.csv"
+        output_file_path = os.path.join(output_dir, output_filename)
+        
+        # Generate the report file
+        success = translation_service.generate_stages_report(batch_id, output_file_path)
+        
+        if success and os.path.exists(output_file_path):
+            logger.info(f"Successfully generated stages report: {output_file_path}")
+            return send_file(output_file_path, as_attachment=True)
+        else:
+            logger.error(f"Failed to generate or find stages report for batch {batch_id} at {output_file_path}")
+            return jsonify({"error": "Failed to generate stages report file"}), 500
+
     @app.route('/results/<batch_id>')
     def view_results(batch_id):
         """Displays the results of a translation batch for review."""
@@ -866,6 +1034,252 @@ def create_app():
                                    content=content_to_edit,
                                    is_editing_base=is_editing_base) # Pass flag to template
     # --- End Rules Routes ---
+
+    # --- Admin Routes --- 
+    @app.route('/admin')
+    def admin_page():
+        """Displays the admin page for Vector Store management."""
+        logger.info("Received request for /admin")
+        try:
+            vector_store_sets = db_manager.get_vector_store_sets(config.DATABASE_FILE)
+        except Exception as e:
+            logger.exception("Error fetching vector store sets for admin page.")
+            flash(f'Error loading vector store sets: {e}', 'danger')
+            vector_store_sets = []
+        return render_template('admin.html', vector_store_sets=vector_store_sets)
+
+    @app.route('/admin/prepare_vs', methods=['POST'])
+    def prepare_vector_stores():
+        """Handles CSV upload, creates DB entries, and starts background processing."""
+        logger.info("Received POST request for /admin/prepare_vs")
+        file_path = None # Initialize for finally block
+        set_id = None    # Initialize for cleanup logic
+        try:
+            if 'full_translation_csv' not in request.files:
+                flash('No file part in the request.', 'warning')
+                logger.warning("Prepare VS: No file part in request.")
+                return redirect(url_for('admin_page'))
+
+            file = request.files['full_translation_csv']
+            if file.filename == '':
+                flash('No selected file.', 'warning')
+                logger.warning("Prepare VS: No file selected.")
+                return redirect(url_for('admin_page'))
+
+            if file and allowed_file(file.filename):
+                filename = secure_filename(file.filename)
+                file_path = os.path.join(UPLOAD_FOLDER, filename)
+                logger.info(f"Prepare VS: Processing uploaded file: {filename}")
+
+                # Avoid overwriting
+                if os.path.exists(file_path):
+                     flash(f'File {filename} already exists. Please rename and re-upload.', 'warning')
+                     logger.warning(f"Prepare VS: File {filename} already exists.")
+                     return redirect(url_for('admin_page'))
+
+                file.save(file_path)
+                logger.info(f"Prepare VS: File saved to {file_path}")
+
+                notes = request.form.get('notes', '') # Get notes from form
+
+                # 1. Add Set to DB
+                set_id = db_manager.add_vector_store_set(config.DATABASE_FILE, filename, notes)
+                if set_id is None:
+                    flash('Database error creating vector store set entry.', 'danger')
+                    logger.error(f"Prepare VS: Failed to add VectorStoreSet to DB for {filename}")
+                    # No need to delete set if it wasn't created
+                    raise Exception("Failed to create DB set entry.") # Raise to trigger cleanup
+
+                logger.info(f"Prepare VS: Created VectorStoreSet ID: {set_id} for {filename}")
+
+                # 2. Parse Header and Add Mappings
+                try:
+                    df_header = pd.read_csv(file_path, nrows=0) # Read only header
+                    target_lang_cols = [col for col in df_header.columns if re.match(r'^tg_([a-zA-Z]{2,3}[A-Z]{2})$', col)]
+                    logger.info(f"Prepare VS: Found target language columns for Set {set_id}: {target_lang_cols}")
+
+                    if not target_lang_cols:
+                         flash('No target language columns (e.g., tg_frFR) found in CSV header.', 'danger')
+                         logger.error(f"Prepare VS: No target columns found in {filename} for Set {set_id}")
+                         # Cleanup handled by exception/finally block
+                         raise ValueError("No target language columns found in CSV.")
+
+                    # Check for source column before proceeding
+                    if SOURCE_COLUMN_NAME not in df_header.columns:
+                        flash(f"Source column '{SOURCE_COLUMN_NAME}' not found in CSV header.", 'danger')
+                        logger.error(f"Prepare VS: Source column '{SOURCE_COLUMN_NAME}' not found in {filename} for Set {set_id}")
+                        raise ValueError(f"Source column '{SOURCE_COLUMN_NAME}' missing.")
+
+                    mappings_added = 0
+                    added_languages_in_set = set() # Keep track of languages added for this set
+                    for col_name in target_lang_cols:
+                        match = re.match(r'^tg_([a-zA-Z]{2,3}[A-Z]{2})$', col_name)
+                        lang_code = match.group(1)
+
+                        # Check for duplicates within this set processing
+                        if lang_code in added_languages_in_set:
+                            logger.warning(f"Prepare VS: Duplicate language code '{lang_code}' derived from column '{col_name}' for Set {set_id}. Skipping duplicate mapping.")
+                            continue # Skip this column
+
+                        mapping_id = db_manager.add_vector_store_mapping(config.DATABASE_FILE, set_id, lang_code, col_name)
+                        if mapping_id:
+                            mappings_added += 1
+                            added_languages_in_set.add(lang_code) # Add to set only on successful DB add
+                        else:
+                            logger.error(f"Prepare VS: Failed to add mapping for {lang_code} ({col_name}) for Set {set_id}")
+                            # If one mapping fails, should we abort the whole thing?
+
+                    logger.info(f"Prepare VS: Successfully added {mappings_added} mappings for Set {set_id}")
+
+                except ValueError as ve:
+                    # Reraise specific ValueErrors from checks above
+                    raise ve
+                except Exception as e:
+                    flash(f'Error parsing CSV header or adding mappings: {e}', 'danger')
+                    logger.exception(f"Prepare VS: Error parsing CSV header/adding mappings for {filename}, Set {set_id}")
+                    raise Exception("CSV Header/Mapping Error") # Trigger cleanup
+
+                # 3. Start Background Thread
+                logger.info(f"Prepare VS: Starting background processing thread for Set {set_id}")
+                thread = threading.Thread(target=_process_vector_store_set_background,
+                                          args=(app.app_context(), set_id, file_path),
+                                          daemon=True)
+                thread.start()
+                # Reset file_path after starting thread so finally block doesn't delete it
+                file_path_to_keep = file_path
+                file_path = None 
+
+                flash(f'Successfully uploaded {filename}. Vector Store creation started in the background for Set ID {set_id}.', 'success')
+                return redirect(url_for('admin_page'))
+
+            else:
+                flash('Invalid file type. Only CSV files are allowed.', 'danger')
+                logger.warning(f"Prepare VS: Invalid file type uploaded: {file.filename}")
+                # No file saved, no DB entry, just redirect
+                return redirect(url_for('admin_page'))
+
+        except Exception as e:
+            # General error handling for the entire try block
+            # Log the specific exception that occurred
+            logger.exception(f"Prepare VS: Error during file upload/preparation for Set ID {set_id or 'N/A'}: {e}")
+            # Use a more generic flash message unless it was a specific ValueError we raised
+            if isinstance(e, ValueError):
+                # We already flashed a specific message for these
+                pass
+            elif isinstance(e, FileExistsError):
+                 # Already flashed
+                 pass
+            else:
+                 flash(f'An unexpected error occurred: {e}', 'danger')
+            # Cleanup happens in finally block
+            return redirect(url_for('admin_page'))
+            
+        finally:
+            # Cleanup: Delete the saved file and DB entries if an error occurred *before* the thread started
+            if file_path and os.path.exists(file_path):
+                logger.warning(f"Prepare VS: Cleaning up file due to error: {file_path}")
+                try:
+                    os.remove(file_path)
+                except OSError as rm_e:
+                    logger.error(f"Prepare VS: Error removing file during cleanup: {rm_e}")
+            if set_id and file_path: # Only delete DB if set was created AND file cleanup needed (i.e., thread didn't start)
+                logger.warning(f"Prepare VS: Cleaning up DB entries for Set ID {set_id} due to error before thread start.")
+                db_manager.delete_vector_store_set(config.DATABASE_FILE, set_id)
+
+
+    @app.route('/admin/activate_vs/<int:set_id>', methods=['POST'])
+    def activate_vector_store_set(set_id):
+        """Activates the specified Vector Store Set."""
+        logger.info(f"Received request to activate Vector Store Set ID: {set_id}")
+        try:
+            # Check if the set has all mappings completed first? (Optional but safer)
+            mappings = db_manager.get_mappings_for_set(config.DATABASE_FILE, set_id)
+            if not mappings: 
+                 flash(f"Cannot activate Set {set_id}: No language mappings found.", "warning")
+                 logger.warning(f"Activation failed for Set {set_id}: No mappings.")
+                 return redirect(url_for('admin_page'))
+                 
+            all_complete = all(m['status'] == 'completed' for m in mappings)
+            if not all_complete:
+                 failed_langs = [m['language_code'] for m in mappings if m['status'] != 'completed']
+                 flash(f"Cannot activate Set {set_id}: Not all language stores are complete. Failed/Pending: {failed_langs}", "warning")
+                 logger.warning(f"Activation failed for Set {set_id}: Not all mappings complete ({failed_langs}).")
+                 return redirect(url_for('admin_page'))
+
+            # Proceed with activation
+            activated = db_manager.activate_set(config.DATABASE_FILE, set_id)
+            if activated:
+                flash(f"Vector Store Set {set_id} activated successfully.", "success")
+                logger.info(f"Successfully activated Set {set_id} via admin UI.")
+            else:
+                flash(f"Failed to activate Vector Store Set {set_id}. Set might not exist or DB error occurred.", "danger")
+                logger.error(f"Failed to activate Set {set_id} via admin UI (db_manager.activate_set returned False).")
+        except Exception as e:
+            logger.exception(f"Error activating Vector Store Set {set_id}: {e}")
+            flash(f'An unexpected error occurred during activation: {e}', 'danger')
+
+        return redirect(url_for('admin_page'))
+
+    # --- NEW: Endpoint for AJAX status checks ---
+    @app.route('/admin/set_status/<int:set_id>')
+    def get_vector_store_set_status(set_id):
+        """Returns the status summary of mappings for a given VectorStoreSet ID."""
+        logger.debug(f"Received status request for Set ID: {set_id}")
+        try:
+            mappings = db_manager.get_mappings_for_set(config.DATABASE_FILE, set_id)
+            if mappings is None: # Error fetching mappings
+                return jsonify({"error": "Failed to fetch mapping status"}), 500
+            if not mappings: # Set exists but has no mappings (shouldn't happen in normal flow)
+                 # Check if the set itself exists, provide some info
+                 set_info = db_manager.get_vector_store_sets_by_id(config.DATABASE_FILE, set_id) # Need this new DB function
+                 if set_info:
+                     return jsonify({"status": "No Mappings", "total": 0, "is_active": set_info['is_active']}), 200
+                 else:
+                     return jsonify({"error": "Set not found"}), 404
+
+            total_mappings = len(mappings)
+            status_counts = {
+                'pending': 0,
+                'processing': 0,
+                'completed': 0,
+                'failed': 0
+            }
+            for m in mappings:
+                status_counts[m['status']] = status_counts.get(m['status'], 0) + 1
+
+            # Determine overall status text
+            overall_status_text = "Unknown"
+            if status_counts['processing'] > 0:
+                overall_status_text = f"Processing ({status_counts['completed']}/{total_mappings})"
+            elif status_counts['pending'] > 0 and total_mappings > 0 and status_counts['completed'] == 0 and status_counts['failed'] == 0:
+                 overall_status_text = "Pending"
+            elif status_counts['completed'] == total_mappings and total_mappings > 0:
+                overall_status_text = "Completed"
+            elif status_counts['failed'] > 0:
+                overall_status_text = f"Failed ({status_counts['failed']} Errors)" 
+            elif total_mappings == 0: # Should be caught above, but belt-and-suspenders
+                 overall_status_text = "No Mappings"
+                 
+            # Get the set's active status as well
+            set_info = db_manager.get_vector_store_sets_by_id(config.DATABASE_FILE, set_id) # Need this new DB function
+            is_active = set_info['is_active'] if set_info else 0 
+
+            response_data = {
+                "status": overall_status_text,
+                "total": total_mappings,
+                "completed": status_counts['completed'],
+                "processing": status_counts['processing'],
+                "pending": status_counts['pending'],
+                "failed": status_counts['failed'],
+                "is_active": is_active
+            }
+            logger.debug(f"Returning status for Set ID {set_id}: {response_data}")
+            return jsonify(response_data), 200
+
+        except Exception as e:
+            logger.exception(f"Error fetching status for Set ID {set_id}: {e}")
+            return jsonify({"error": "An internal server error occurred"}), 500
+    # --- End AJAX status endpoint ---
 
     @app.route('/placeholder') # Keep or remove this placeholder?
     def placeholder():

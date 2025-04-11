@@ -23,7 +23,7 @@
         <div>
             <!-- Export Buttons -->
             <a href="{{ url_for('export_batch', batch_id=batch['batch_id']) }}" class="btn btn-success me-2" role="button" target="_blank">Download Approved CSV</a>
-            {% if batch_config and batch_config.mode == 'THREE_STAGE' %}
+            {% if batch_config and batch_config.mode in ['THREE_STAGE', 'FOUR_STAGE'] %}
                 <a href="{{ url_for('export_stages_report', batch_id=batch['batch_id']) }}" class="btn btn-info" role="button" target="_blank">Download Stages Report</a>
             {% endif %}
         </div>
@@ -41,7 +41,8 @@
 {% block scripts %}
     <script>
         // Pass Flask data to JavaScript
-        const taskData = {{ tasks|tojson }};
+        // eslint-disable-next-line
+        const taskData = {{ tasks|tojson|safe }};
         console.log("Task data received:", taskData);
 
         // Custom formatter for review status badges
@@ -128,7 +129,7 @@
                     width: 140, hozAlign: "center", 
                     formatter: statusFormatter, 
                     headerFilter: "select", 
-                    headerFilterParams:{values:["", "pending_review", "approved_original", "approved_edited", "denied"], sortValuesList: "asc"},
+                    headerFilterParams:{values:["", "pending_review", "approved_original", "approved_edited", "denied"]},
                     headerFilterPlaceholder: "Filter Status...",
                     resizable: false,
                     editor: "list",

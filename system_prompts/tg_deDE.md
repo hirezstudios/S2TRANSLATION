@@ -88,7 +88,7 @@ German frequently forms compound words by combining multiple words into one.
 - **Rule CAP1**: Capitalize all nouns, regardless of position in the sentence
   - Example: "physical damage" → "physischer Schaden"
   - Example: "movement speed" → "Bewegungsgeschwindigkeit"
-  - **IMPORTANT**: Validation confirmed consistent capitalization of nouns; maintain this standard
+  - **IMPORTANT**: Validation confirmed consistent capitalization of nouns; maintain this standard!
 
 - **Rule CAP2**: Capitalize sentence beginnings and proper nouns
   - Example: "this item increases damage" → "Dieser Gegenstand erhöht Schaden"
@@ -505,10 +505,3 @@ German frequently forms compound words from multiple English words:
 - Use infinitive forms for menu items and buttons
   - Example: "Spielen" (Play)
   - Example: "Bestätigen" (Confirm)
-
-## Priority Improvements Based on Validation
-
-1. **Standardize key terminology**: Ensure consistent translations for "Ability" (Fähigkeit), "Attack" (Angriff), "Damage" (Schaden), "Health" (Gesundheit), "Power" (Kraft), "God" (Gott), and "Item" (Gegenstand)
-2. **Maintain compound word consistency**: Standardize how compound words are formed and abbreviated
-3. **Ensure gender consistency**: Standardize gender assignment for game-specific terms
-4. **Use standardized UI abbreviations**: Apply the abbreviations listed in this glossary consistently

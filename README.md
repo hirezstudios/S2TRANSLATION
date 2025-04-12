@@ -19,7 +19,8 @@ This application uses a Flask + Python Threading + Frontend Polling architecture
 ## Features
 
 *   **CSV Upload:** Upload input files containing source text (`src_enUS`) and target language columns (`tg_XXXX`).
-*   **Dynamic Language Detection:** Identifies potentially translatable languages from input file columns and prompt files.
+*   **Single Phrase Input:** Optionally enter a single English phrase directly for translation instead of uploading a file.
+*   **Dynamic Language Detection:** Identifies potentially translatable languages from input file columns or lists languages with available rule files.
 *   **Mode Selection:** Choose between:
     *   `ONE_STAGE`: Direct translation.
     *   `THREE_STAGE`: Translate -> Evaluate -> Refine.
@@ -67,7 +68,9 @@ This application uses a Flask + Python Threading + Frontend Polling architecture
 ## Usage
 
 1.  **Admin Page (First Use/Update VS):** Prepare and activate an OpenAI Vector Store set if using VS features.
-2.  **Home Page:** Upload CSV, select languages, (optionally) add batch prompt, choose mode (defaults to Four Stage), configure APIs/Models (S0-S3 as applicable), ensure "Use Vector Store" is checked if needed (auto for Four Stage), start job.
+2.  **Home Page:** Choose "Upload CSV File" or "Enter Single Phrase".
+    *   **CSV:** Upload CSV, select languages found in columns, configure options, start job.
+    *   **Phrase:** Enter English phrase, select languages from available rule files, configure options, start job.
 3.  **Monitor:** Track progress on the Home page.
 4.  **Batch History:** View past jobs.
 5.  **Results Page:** Access via links. Review/edit translations. Download reports.

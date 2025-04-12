@@ -1,0 +1,3 @@
+Record ID,Context,DeveloperNotes,src_enUS,tg_esLA,tg_frFR
+test_001,MainMenu,Button text,"Hello","Hola","Bonjour"
+test_002,MainMenu,Tooltip,"Click here to start","Haz clic aquí para empezar","Cliquez ici pour commencer" 

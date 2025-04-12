@@ -17,6 +17,8 @@ import logging
 import uuid
 from datetime import datetime
 import importlib
+import pandas as pd # <<< Ensure pandas is imported >>>
+import io           # <<< Ensure io is imported >>>
 
 # Import local modules
 from . import config
@@ -549,7 +551,6 @@ def translate_row_worker(task_id, batch_id, row_index, lang_code, source_text, w
     # --- Retrieve Config --- 
     db_path = worker_config['db_path']
     translation_mode = worker_config['translation_mode']
-    default_api = worker_config['default_api']
     stage1_api_cfg = worker_config['stage1_api']
     stage2_api_cfg = worker_config['stage2_api']
     stage3_api_cfg = worker_config['stage3_api']
@@ -731,7 +732,7 @@ def translate_row_worker(task_id, batch_id, row_index, lang_code, source_text, w
         # --- Mode-Specific Execution --- 
         if translation_mode == "ONE_STAGE":
             # --- ONE_STAGE Execution --- 
-            api_to_use = default_api
+            api_to_use = stage1_api_cfg
             model_to_use = None 
             vs_id_for_call = target_openai_vs_id if use_vs and api_to_use == "OPENAI" else None
             if vs_id_for_call:
@@ -984,23 +985,20 @@ def run_batch_background(batch_id):
     success_count = 0
     error_count = 0
     
-    # Prepare worker_config
-    openai_client_thread = api_clients.get_openai_client()
+    # Create a configuration dictionary to pass to each worker
     worker_config = {
         'db_path': db_path,
         'translation_mode': batch_config.get('mode', 'ONE_STAGE'),
-        'default_api': batch_config.get('default_api'),
         'stage1_api': batch_config.get('s1_api'),
         'stage2_api': batch_config.get('s2_api'),
         'stage3_api': batch_config.get('s3_api'),
         'stage1_model': batch_config.get('s1_model'),
         'stage2_model': batch_config.get('s2_model'),
         'stage3_model': batch_config.get('s3_model'),
-        's0_model': batch_config.get('s0_model', config.S0_MODEL),
-        'target_column_tpl': config.TARGET_COLUMN_TPL,
+        's0_model': batch_config.get('s0_model'), # Added S0
+        'batch_prompt': batch_config.get('batch_prompt', ''),
         'use_vs': batch_config.get('use_vs', False),
-        'openai_client': openai_client_thread,
-        'batch_prompt': batch_prompt,
+        'openai_client': api_clients.get_openai_client() or None, # Pass client instance
         'update_strategy': batch_config.get('update_strategy', 'retranslate')
     }
     
@@ -1054,84 +1052,129 @@ def run_batch_background(batch_id):
 
 # --- Input Processing --- 
 def prepare_batch(input_file_path, original_filename, selected_languages, mode_config):
-    """Parses input CSV, stores header/filename, creates DB entries."""
-    db_path = config.DATABASE_FILE 
+    """Reads input CSV using pandas, validates columns, and creates batch/task entries in the DB."""
+    logger.info(f"Preparing batch {original_filename} from {input_file_path} for languages: {selected_languages}")
+    db_path = config.DATABASE_FILE
     batch_id = str(uuid.uuid4())
-    # filename = os.path.basename(input_file_path) # Use original_filename for DB record
-    logger.info(f"Preparing batch {batch_id} from file: {original_filename}")
-    
-    original_header = []
-    tasks_to_create = []
-    target_columns_in_file = set()
+    batch_start_time = datetime.now()
+    update_strategy = mode_config.get('update_strategy', 'retranslate')
+    input_type = mode_config.get('input_type', 'csv')
 
     try:
-        with open(input_file_path, 'r', encoding='utf-8') as infile:
-            reader = csv.DictReader(infile)
-            original_header = reader.fieldnames or []
-            if config.SOURCE_COLUMN not in original_header:
-                logger.error(f"Source column '{config.SOURCE_COLUMN}' not found in {original_filename}")
-                # Cannot proceed without source column
-                return None 
-            
-            target_columns_in_file = {f for f in original_header if f.startswith("tg_")}
-            metadata_columns = [f for f in original_header if not f.startswith("tg_") and f != config.SOURCE_COLUMN]
+        # 1. Read the CSV file using pandas
+        df = pd.read_csv(input_file_path)
+        logger.info(f"Read {len(df)} rows from {input_file_path}")
 
-            for i, row in enumerate(reader):
-                source_text = row.get(config.SOURCE_COLUMN, "").strip()
-                metadata = {col: row.get(col, "") for col in metadata_columns}
-                metadata_json = json.dumps(metadata)
-                logger.debug(f"Batch {batch_id}, Row {i}: Prepared metadata_json: {metadata_json}") 
+        if df.empty:
+            logger.warning(f"Input file {original_filename} is empty. Creating batch with 0 tasks.")
+            config_details_json = json.dumps(mode_config)
+            success = db_manager.add_batch(db_path, batch_id, original_filename, config_details_json)
+            if success:
+                db_manager.update_batch_status(db_path, batch_id, 'completed_empty')
+                logger.info(f"Created empty batch {batch_id} with status 'completed_empty'.")
+                return None # Indicate no processing needed
+            else:
+                logger.error(f"Failed to add empty batch record {batch_id} to database.")
+                return None
+
+        # 2. Validate required columns
+        # <<< RELAX VALIDATION: Only require Source and Record ID >>>
+        required_cols = {config.SOURCE_COLUMN, "Record ID"}
+        logger.info(f"Validating presence of core columns: {required_cols}")
+        
+        # Still check for target columns if strategy requires reading existing text
+        if update_strategy != 'retranslate':
+            target_cols_to_check = {f"tg_{lang}" for lang in selected_languages}
+            # Only add target cols to validation if they are *needed* for the strategy
+            required_cols.update(target_cols_to_check)
+            logger.info(f"Update strategy is '{update_strategy}', *also* checking for target columns: {target_cols_to_check}")
+        # else:
+        #     logger.info(f"Update strategy is 'retranslate', skipping target column check for {input_type} input.")
+        # <<< END RELAXED VALIDATION >>>
+
+        missing_cols = required_cols - set(df.columns)
+        if missing_cols:
+            err_msg = f"Missing required columns in {original_filename}: {missing_cols}. "
+            if update_strategy != 'retranslate' and any(col.startswith('tg_') for col in missing_cols):
+                err_msg += f"Target columns ({target_cols_to_check}) are required for '{update_strategy}' strategy." 
+            else:
+                 # Adjust error message for core columns
+                 err_msg += f"Core columns ({config.SOURCE_COLUMN}, Record ID) are required."
+            logger.error(err_msg)
+            return None
+
+        # 3. Add Batch entry to DB
+        # Add original header info to config details
+        mode_config['original_header'] = df.columns.tolist()
+        config_details_json = json.dumps(mode_config)
+        success = db_manager.add_batch(db_path, batch_id, original_filename, config_details_json)
+        # <<< REMOVE THIS CHECK - add_batch raises exception on failure >>>
+        # if not success:
+        #     logger.error("add_batch returned False unexpectedly.")
+        #     return None
+
+        # 4. Add Task entries to DB
+        tasks_added = 0
+        for index, row in df.iterrows():
+            source_text = str(row.get(config.SOURCE_COLUMN, "")) # Ensure string
+            metadata = {
+                "Record ID": str(row.get("Record ID", "")),
+                "Context": str(row.get("Context", "")),
+                "DeveloperNotes": str(row.get("DeveloperNotes", ""))
+            }
+            metadata_json = json.dumps(metadata)
+
+            for lang_code in selected_languages:
+                initial_target_text = None
+                if update_strategy != 'retranslate':
+                    target_col_name = f"tg_{lang_code}"
+                    # Column presence already validated if needed
+                    initial_target_text = row.get(target_col_name)
+                    if pd.isna(initial_target_text):
+                        initial_target_text = None
+                    else:
+                        initial_target_text = str(initial_target_text)
                 
-                for lang_code in selected_languages:
-                    target_col_name = config.TARGET_COLUMN_TPL.format(lang_code=lang_code)
-                    # --- Get initial target text from input file --- 
-                    initial_target_text_from_file = None
-                    if target_col_name in row:
-                        initial_target_text_from_file = row[target_col_name]
-                        if isinstance(initial_target_text_from_file, str):
-                             initial_target_text_from_file = initial_target_text_from_file.strip()
-                         # Ensure empty strings are treated as None or empty for consistency, maybe check later
-                         # if not initial_target_text_from_file:
-                         #     initial_target_text_from_file = None 
-                    # --- End get initial target text ---
+                # Check if the prompt file actually exists for this language
+                if lang_code not in prompt_manager.stage1_templates: # Use loaded prompt keys
+                     logger.warning(f"Skipping task for lang {lang_code}, row {index}: Prompt template not loaded.")
+                     continue # Skip this language for this row
 
-                    # Check language availability (prompt and column)
-                    if lang_code in prompt_manager.stage1_templates and target_col_name in target_columns_in_file:
-                         # Add task details to a list for bulk insertion later?
-                         # For now, add one by one
-                         logger.debug(f"Batch {batch_id}, Row {i}, Lang {lang_code}: Calling add_translation_task... Initial Target: '{initial_target_text_from_file}'") # Added log
-                         db_manager.add_translation_task(
-                             db_path, 
-                             batch_id, 
-                             i, 
-                             lang_code, 
-                             source_text, 
-                             metadata_json,
-                             initial_target_text=initial_target_text_from_file # <<< PASS VALUE >>>
-                         )
-                         # tasks_to_create.append((batch_id, i, lang_code, source_text, metadata_json, initial_target_text_from_file))
-                    elif lang_code not in prompt_manager.stage1_templates:
-                         logger.warning(f"Skipping language {lang_code} for row {i}: Lang code not available (missing prompt file?).")
-    except Exception as e:
-        logger.exception(f"Error processing input file {original_filename} for batch {batch_id}: {e}")
-        # Don't create batch record if file processing fails
+                db_manager.add_translation_task(
+                    db_path, # Pass db_path positionally
+                    batch_id=batch_id,
+                    row_index=index,
+                    lang_code=lang_code,
+                    source_text=source_text,
+                    metadata_json=metadata_json,
+                    initial_target_text=initial_target_text
+                )
+                tasks_added += 1
+
+        if tasks_added == 0:
+            logger.warning(f"No tasks were successfully added for batch {batch_id}. Check logs for errors or language availability.")
+            db_manager.update_batch_status(db_path, batch_id, 'failed') 
+            return None
+
+        logger.info(f"Successfully added {tasks_added} tasks for batch {batch_id}")
+        db_manager.update_batch_status(db_path, batch_id, 'pending')
+        return batch_id
+
+    except pd.errors.EmptyDataError:
+        logger.error(f"Input file is empty: {input_file_path}")
         return None
-
-    # Check if any tasks were actually created
-    tasks_added = db_manager.count_tasks_for_batch(db_path, batch_id) # Need this new DB function
-    if tasks_added == 0:
-        logger.warning(f"No valid tasks could be created for batch {batch_id}. Check file content, selected languages, columns, prompt files.")
-        return None 
-        
-    # Store config snapshot *including the original header*
-    config_snapshot_dict = {**mode_config, "original_header": original_header}
-    config_snapshot_json = json.dumps(config_snapshot_dict)
-    # Use original_filename when adding batch record
-    db_manager.add_batch(db_path, batch_id, original_filename, config_snapshot_json)
-        
-    logger.info(f"Added {tasks_added} tasks for batch {batch_id}.")
-    db_manager.update_batch_status(db_path, batch_id, 'pending') # Mark as ready for processing
-    return batch_id
+    except FileNotFoundError:
+        logger.error(f"Input file not found: {input_file_path}")
+        return None
+    except Exception as e:
+        logger.exception(f"Error during batch preparation for {input_file_path}: {e}")
+        if 'batch_id' in locals() and batch_id:
+            try:
+                logger.info(f"Marking batch {batch_id} as failed due to preparation error: {e}")
+                db_manager.update_batch_status(db_path, batch_id, 'failed') 
+            except Exception as cleanup_e:
+                logger.error(f"Failed to update batch status to failed for {batch_id} after error: {cleanup_e}")
+        return None # Original line
 
 # --- Export --- #
 def generate_export(batch_id, output_file_path):

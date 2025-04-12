@@ -1,5 +1,6 @@
 import os
 from dotenv import load_dotenv
+import logging
 
 load_dotenv()
 
@@ -50,7 +51,26 @@ STAGE0_TEMPLATE_FILE = "system_prompts/stage0_glossary_template.md"
 # --- CSV/DB Configuration ---
 INPUT_CSV_DIR = "input/" # Base directory for inputs
 OUTPUT_DIR = "output/" # Base directory for outputs
-DATABASE_FILE = os.getenv("DATABASE_FILE", "database.db").split('#')[0].strip().strip('"').strip("'")
+
+# --- Database Configuration ---
+logger = logging.getLogger(__name__) # Add this if not already present at top
+
+IS_PRODUCTION = os.getenv('REPL_DEPLOYMENT', '0') == '1'
+
+# 1. Determine the *default* database path based on the environment
+default_db_path = '/mnt/data/database.db' if IS_PRODUCTION else 'database.db'
+logger.info(f"Default DB path based on environment (IS_PRODUCTION={IS_PRODUCTION}): {default_db_path}")
+
+# 2. Get the database file path: Use environment variable if set, otherwise use the calculated default
+db_file_setting = os.getenv("DATABASE_FILE", default_db_path)
+logger.info(f"DB path retrieved from os.getenv('DATABASE_FILE', default): {db_file_setting}")
+
+# 3. Clean up the final value (remove potential comments and surrounding quotes)
+DATABASE_FILE = db_file_setting.split('#')[0].strip().strip('"').strip("'")
+
+logger.info(f"Final DATABASE_FILE path configured to: {DATABASE_FILE}")
+# --- End Database Configuration ---
+
 SOURCE_COLUMN = "src_enUS"
 TARGET_COLUMN_TPL = "tg_{lang_code}"
 

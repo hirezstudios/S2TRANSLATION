@@ -5,15 +5,47 @@
 {% block content %}
     <h2>1. Upload & Configure</h2>
     <form id="upload-form" method="post" enctype="multipart/form-data">
+        
+        <!-- Input Mode Selection -->
         <div class="mb-3">
-            <label for="csvfile" class="form-label">Input CSV File (in Gridly format)</label>
-            <input class="form-control" type="file" id="csvfile" name="file" accept=".csv" required>
+            <label class="form-label d-block">Input Mode</label>
+            <div class="form-check form-check-inline">
+                <input class="form-check-input" type="radio" name="input_mode_selector" id="mode_csv" value="csv" checked>
+                <label class="form-check-label" for="mode_csv">Upload CSV File</label>
+            </div>
+            <div class="form-check form-check-inline">
+                <input class="form-check-input" type="radio" name="input_mode_selector" id="mode_phrase" value="phrase">
+                <label class="form-check-label" for="mode_phrase">Enter Single Phrase</label>
+            </div>
+            <input type="hidden" name="input_mode" id="input_mode_hidden" value="csv"> <!-- Hidden input to send actual mode -->
+        </div>
+        
+        <!-- CSV Input Section (Initially Visible) -->
+        <div id="csv-input-section">
+            <div class="mb-3">
+                <label for="csvfile" class="form-label">Input CSV File (in Gridly format)</label>
+                <input class="form-control" type="file" id="csvfile" name="file" accept=".csv">
+            </div>
+            <div class="mb-3">
+                <label class="form-label">Languages to Translate (from CSV columns)</label>
+                <div id="language-options-csv" class="border p-2 rounded" style="min-height: 50px;">
+                    <small class="text-muted">Upload a file to see available languages.</small>
+                </div>
+            </div>
         </div>
 
-        <div class="mb-3">
-            <label class="form-label">Languages to Translate</label>
-            <div id="language-options" class="border p-2 rounded" style="min-height: 50px;">
-                <small class="text-muted">Upload a file to see available languages.</small>
+        <!-- Phrase Input Section (Initially Hidden) -->
+        <div id="phrase-input-section" style="display: none;">
+            <div class="mb-3">
+                <label for="source-phrase-input" class="form-label">Source English Phrase</label>
+                <textarea class="form-control" id="source-phrase-input" name="source_phrase" rows="3" placeholder="Enter the English text to translate..."></textarea>
+            </div>
+            <div class="mb-3">
+                <label class="form-label">Languages to Translate (Select from available rules)</label>
+                <div id="language-options-phrase" class="border p-2 rounded" style="min-height: 50px;">
+                    <!-- Language checkboxes will be populated here by JS -->
+                    <small class="text-muted">Loading available languages...</small> 
+                </div>
             </div>
         </div>
 
@@ -173,7 +205,7 @@
 <script>
     // --- Element References --- 
     const fileInput = document.getElementById('csvfile');
-    const langOptionsDiv = document.getElementById('language-options');
+    const langOptionsDiv = document.getElementById('language-options-csv');
     const startBtn = document.getElementById('start-job-btn');
     const uploadForm = document.getElementById('upload-form');
     const statusArea = document.getElementById('status-area');
@@ -192,10 +224,118 @@
     const useVsCheckbox = document.getElementById('use-vector-store');
     const useVsLabel = document.getElementById('use-vector-store-label');
     
+    // <<< NEW: Input Mode Elements >>>
+    const modeCsvRadio = document.getElementById('mode_csv');
+    const modePhraseRadio = document.getElementById('mode_phrase');
+    const csvInputSection = document.getElementById('csv-input-section');
+    const phraseInputSection = document.getElementById('phrase-input-section');
+    const langOptionsCsvDiv = document.getElementById('language-options-csv');
+    const langOptionsPhraseDiv = document.getElementById('language-options-phrase');
+    const phraseInput = document.getElementById('source-phrase-input');
+    const hiddenInputMode = document.getElementById('input_mode_hidden');
+    const updateStrategyRadios = document.querySelectorAll('input[name="update_strategy"]');
+    // <<< END NEW >>>
+    
     let currentBatchId = null;
     let statusInterval = null;
 
     // --- Functions --- 
+
+    // <<< NEW: Function to toggle Input Mode UI >>>
+    async function toggleInputMode() {
+        if (modeCsvRadio.checked) {
+            hiddenInputMode.value = 'csv';
+            csvInputSection.style.display = 'block';
+            phraseInputSection.style.display = 'none';
+            fileInput.required = true; // Make file input required again
+            phraseInput.required = false;
+            langOptionsPhraseDiv.innerHTML = '<small class="text-muted">Language selection via CSV upload.</small>'; // Clear phrase languages
+            // Re-enable update strategy options if they were disabled
+            updateStrategyRadios.forEach(radio => radio.disabled = false);
+            // Trigger language check if a file is already selected
+            if (fileInput.files && fileInput.files.length > 0) {
+                handleCsvFileChange(); // Reuse existing handler
+            } else {
+                langOptionsCsvDiv.innerHTML = '<small class="text-muted">Upload a file to see available languages.</small>';
+            }
+        } else { // Phrase mode
+            hiddenInputMode.value = 'phrase';
+            csvInputSection.style.display = 'none';
+            phraseInputSection.style.display = 'block';
+            fileInput.required = false; // File input not required
+            phraseInput.required = true; // Phrase input is required
+            langOptionsCsvDiv.innerHTML = '<small class="text-muted">Language selection via checkboxes below.</small>'; // Clear CSV languages
+            // Disable update strategy options
+            updateStrategyRadios.forEach(radio => radio.disabled = true);
+            // Fetch and populate languages
+            await populatePhraseLanguageOptions();
+        }
+    }
+
+    // <<< NEW: Function to fetch and populate languages for Phrase mode >>>
+    async function populatePhraseLanguageOptions() {
+        langOptionsPhraseDiv.innerHTML = '<small class="text-muted">Loading available languages...</small>';
+        try {
+            const response = await fetch("{{ url_for('get_available_languages_route') }}");
+            if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
+            const data = await response.json();
+            const languages = data.available_languages;
+
+            langOptionsPhraseDiv.innerHTML = ''; // Clear loading message
+            if (!languages || languages.length === 0) {
+                langOptionsPhraseDiv.innerHTML = '<p class="text-warning">No rule-defined languages found.</p>';
+                startBtn.disabled = true;
+                return;
+            }
+
+            // Add Select All / Unselect All buttons
+            const controlsDiv = document.createElement('div');
+            controlsDiv.classList.add('mb-2');
+            const selectAllBtn = document.createElement('button');
+            selectAllBtn.type = 'button';
+            selectAllBtn.classList.add('btn', 'btn-outline-secondary', 'btn-sm', 'me-2');
+            selectAllBtn.textContent = 'Select All';
+            selectAllBtn.onclick = () => {
+                langOptionsPhraseDiv.querySelectorAll('input[name="languages"]').forEach(cb => cb.checked = true);
+            };
+            const unselectAllBtn = document.createElement('button');
+            unselectAllBtn.type = 'button';
+            unselectAllBtn.classList.add('btn', 'btn-outline-secondary', 'btn-sm');
+            unselectAllBtn.textContent = 'Unselect All';
+            unselectAllBtn.onclick = () => {
+                langOptionsPhraseDiv.querySelectorAll('input[name="languages"]').forEach(cb => cb.checked = false);
+            };
+            controlsDiv.appendChild(selectAllBtn);
+            controlsDiv.appendChild(unselectAllBtn);
+            langOptionsPhraseDiv.appendChild(controlsDiv);
+
+            languages.forEach(lang => {
+                const div = document.createElement('div');
+                div.classList.add('form-check', 'form-check-inline');
+                const input = document.createElement('input');
+                input.classList.add('form-check-input');
+                input.type = 'checkbox';
+                input.value = lang;
+                input.id = `lang_phrase_${lang}`;
+                input.name = 'languages'; // Use the same name as CSV mode for simplicity
+                input.checked = true; 
+                const label = document.createElement('label');
+                label.classList.add('form-check-label');
+                label.htmlFor = `lang_phrase_${lang}`;
+                label.textContent = lang; // TODO: Map to full name if available?
+                div.appendChild(input);
+                div.appendChild(label);
+                langOptionsPhraseDiv.appendChild(div);
+            });
+            startBtn.disabled = false; // Enable start button
+
+        } catch (error) {
+            console.error('Error fetching rule languages:', error);
+            langOptionsPhraseDiv.innerHTML = '<p class="text-danger">Error fetching available languages.</p>';
+            startBtn.disabled = true;
+        }
+    }
+    // <<< END NEW >>>
 
     // Function to toggle API config display and disable/enable fields
     function toggleApiConfigVisibility() {
@@ -251,11 +391,11 @@
         }
     }
 
-    // Function to populate language options fetched from server
-    function populateLanguageOptions(languages) {
-        langOptionsDiv.innerHTML = ''; // Clear previous
+    // Function to populate language options (FOR CSV MODE - RENAME)
+    function populateCsvLanguageOptions(languages) {
+        langOptionsCsvDiv.innerHTML = ''; // Use correct div ID
         if (!languages || languages.length === 0) {
-            langOptionsDiv.innerHTML = '<p class="text-warning">No translatable languages found in file/config.</p>';
+            langOptionsCsvDiv.innerHTML = '<p class="text-warning">No translatable languages found in file/config.</p>';
             startBtn.disabled = true;
             return;
         }
@@ -268,18 +408,18 @@
         selectAllBtn.classList.add('btn', 'btn-outline-secondary', 'btn-sm', 'me-2');
         selectAllBtn.textContent = 'Select All';
         selectAllBtn.onclick = () => {
-            langOptionsDiv.querySelectorAll('input[name="languages"]').forEach(cb => cb.checked = true);
+            langOptionsCsvDiv.querySelectorAll('input[name="languages"]').forEach(cb => cb.checked = true);
         };
         const unselectAllBtn = document.createElement('button');
         unselectAllBtn.type = 'button';
         unselectAllBtn.classList.add('btn', 'btn-outline-secondary', 'btn-sm');
         unselectAllBtn.textContent = 'Unselect All';
         unselectAllBtn.onclick = () => {
-            langOptionsDiv.querySelectorAll('input[name="languages"]').forEach(cb => cb.checked = false);
+            langOptionsCsvDiv.querySelectorAll('input[name="languages"]').forEach(cb => cb.checked = false);
         };
         controlsDiv.appendChild(selectAllBtn);
         controlsDiv.appendChild(unselectAllBtn);
-        langOptionsDiv.appendChild(controlsDiv);
+        langOptionsCsvDiv.appendChild(controlsDiv);
         
         languages.forEach(lang => {
             const div = document.createElement('div');
@@ -288,16 +428,16 @@
             input.classList.add('form-check-input');
             input.type = 'checkbox';
             input.value = lang;
-            input.id = `lang_${lang}`;
+            input.id = `lang_csv_${lang}`; // Use unique ID prefix
             input.name = 'languages';
             input.checked = true; 
             const label = document.createElement('label');
             label.classList.add('form-check-label');
-            label.htmlFor = `lang_${lang}`;
+            label.htmlFor = `lang_csv_${lang}`;
             label.textContent = lang;
             div.appendChild(input);
             div.appendChild(label);
-            langOptionsDiv.appendChild(div);
+            langOptionsCsvDiv.appendChild(div);
         });
         startBtn.disabled = false; // Enable start button
     }
@@ -391,15 +531,18 @@
         }
     }
 
-
-    // --- Event Listeners --- 
-
-    // Fetch Valid Languages on File Change 
-    fileInput.addEventListener('change', async (event) => {
-        langOptionsDiv.innerHTML = '<p class="text-muted">Fetching available languages...</p>';
+    // Fetch Valid Languages on File Change (FOR CSV MODE - RENAME HANDLER)
+    async function handleCsvFileChange(event) {
+        // Only proceed if CSV mode is active
+        if (!modeCsvRadio.checked) return; 
+        
+        langOptionsCsvDiv.innerHTML = '<p class="text-muted">Fetching available languages from CSV...</p>';
         startBtn.disabled = true;
-        const file = event.target.files[0];
-        if (!file) return;
+        const file = event ? event.target.files[0] : fileInput.files[0]; // Handle direct call
+        if (!file) {
+             langOptionsCsvDiv.innerHTML = '<small class="text-muted">Upload a file to see available languages.</small>';
+             return;
+        }
 
         const formData = new FormData();
         formData.append('file', file);
@@ -420,28 +563,59 @@
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ file_path: tempFilePath })
             });
-            if (!langResponse.ok) throw new Error('Failed to fetch valid languages');
+            if (!langResponse.ok) throw new Error('Failed to fetch valid languages from CSV');
             const langData = await langResponse.json();
             
-            populateLanguageOptions(langData.valid_languages);
+            populateCsvLanguageOptions(langData.valid_languages); // Use renamed function
 
         } catch (error) {
-            console.error('Error fetching languages:', error);
-            langOptionsDiv.innerHTML = '<p class="text-danger">Error fetching languages.</p>';
+            console.error('Error fetching languages from CSV:', error);
+            langOptionsCsvDiv.innerHTML = '<p class="text-danger">Error fetching languages from CSV.</p>';
         }
-    });
+    }
+    fileInput.addEventListener('change', handleCsvFileChange); // Attach renamed handler
 
     // Handle Job Start 
     startBtn.addEventListener('click', async () => {
         const formData = new FormData(uploadForm); 
-        if (!fileInput.files || fileInput.files.length === 0) {
-             setStatus('Error: No file selected. Please re-select the file.', 'danger');
-             return;
-        }
-        const selectedLangs = formData.getAll('languages');
-        if (selectedLangs.length === 0) {
-             setStatus('Error: No languages selected.', 'danger');
-             return;
+        const currentMode = hiddenInputMode.value;
+        formData.set('input_mode', currentMode); // Ensure correct mode is sent
+
+        // Validation based on mode
+        if (currentMode === 'csv') {
+            if (!fileInput.files || fileInput.files.length === 0) {
+                 setStatus('Error: No CSV file selected. Please select a file.', 'danger');
+                 return;
+            }
+            // Check if languages were loaded/selected for CSV
+            const csvLangCheckboxes = langOptionsCsvDiv.querySelectorAll('input[name="languages"]:checked');
+            if (csvLangCheckboxes.length === 0 && langOptionsCsvDiv.textContent.includes('No translatable')) {
+                 // No languages found in the file
+                 setStatus('Error: No translatable languages found in the uploaded CSV file.', 'danger');
+                 return;
+            } else if (csvLangCheckboxes.length === 0) {
+                // Languages might have been found but none selected
+                setStatus('Error: No languages selected for CSV mode.', 'danger');
+                return;
+            }
+        } else { // Phrase mode validation
+            if (!phraseInput.value.trim()) {
+                setStatus('Error: Source phrase cannot be empty.', 'danger');
+                return;
+            }
+            const phraseLangCheckboxes = langOptionsPhraseDiv.querySelectorAll('input[name="languages"]:checked');
+            if (phraseLangCheckboxes.length === 0) {
+                 setStatus('Error: No languages selected for phrase mode.', 'danger');
+                 return;
+            }
+            // Collect selected languages for phrase mode (form might not pick them up correctly if dynamically added?)
+            // Let's ensure they are added to formData explicitly
+             formData.delete('languages'); // Remove any potentially incorrect values first
+             phraseLangCheckboxes.forEach(cb => {
+                 formData.append('languages', cb.value);
+             });
+             // The file input might still be in formData if user switched modes, remove it
+             formData.delete('file');
         }
 
         setStatus('Starting job...', 'info');
@@ -483,9 +657,15 @@
     oneStageApiSelect.addEventListener('change', updateVectorStoreCheckbox);
     stage1ApiSelect.addEventListener('change', updateVectorStoreCheckbox);
 
+    // <<< NEW: Input Mode Change Listener >>>
+    modeCsvRadio.addEventListener('change', toggleInputMode);
+    modePhraseRadio.addEventListener('change', toggleInputMode);
+    // <<< END NEW >>>
+
     // --- Initial Setup on Page Load ---
     document.addEventListener('DOMContentLoaded', () => {
         toggleApiConfigVisibility(); // Set initial API section visibility and checkbox state
+        toggleInputMode(); // Set initial input mode UI state
     });
 
 </script>

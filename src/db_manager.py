@@ -185,8 +185,10 @@ def add_batch(db_file_path, batch_id, filename, config_json):
                      (batch_id, filename, config_json, 'pending'))
         conn.commit()
         logger.info(f"Added batch {batch_id} for file {filename}")
+        return True # <<< RETURN TRUE ON SUCCESS >>>
     except sqlite3.Error as e:
         logger.error(f"Failed to add batch {batch_id}: {e}")
+        raise # Re-raise exception
     finally:
         conn.close()
 
@@ -200,8 +202,10 @@ def add_translation_task(db_file_path, batch_id, row_index, lang_code, source_te
             VALUES (?, ?, ?, ?, ?, ?, ?)
         """, (batch_id, row_index, lang_code, source_text, metadata_json, initial_target_text, 'pending'))
         conn.commit()
+        return True # <<< RETURN TRUE ON SUCCESS >>>
     except sqlite3.Error as e:
         logger.error(f"Failed to add task for batch {batch_id}, row {row_index}, lang {lang_code}: {e}")
+        raise # Re-raise exception
     finally:
         conn.close()
 

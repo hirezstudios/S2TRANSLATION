@@ -10,6 +10,7 @@ import glob # Added for rule file scanning
 from datetime import datetime # Added for archiving
 import re # Added for parsing tg_ filenames
 import sys # Add sys import
+import io # <<< ADD io for StringIO >>>
 
 # --- Add project root to sys.path --- #
 sys.path.insert(0, os.path.abspath(os.path.dirname(__file__)))
@@ -45,6 +46,33 @@ USER_ARCHIVE_DIR = os.path.join(USER_PROMPT_DIR, "archive")
 ALLOWED_EXTENSIONS = {'csv'}
 UPLOAD_FOLDER = config.UPLOAD_FOLDER
 SOURCE_COLUMN_NAME = "src_enUS" # Define the expected source column name
+
+# === Helper Functions ===
+def get_available_rule_languages():
+    """Scans the system prompt directory for language-specific rule files (tg_*.md)."""
+    languages = set()
+    try:
+        prompt_dir = config.SYSTEM_PROMPT_DIR
+        if not os.path.isdir(prompt_dir):
+            logger.error(f"System prompt directory not found: {prompt_dir}")
+            return []
+
+        # Regex to match tg_{lang_code}.md and capture lang_code (e.g., esLA, frFR)
+        # Allows 2 or 3 letter language code + 2 letter region code
+        lang_pattern = re.compile(r'^tg_([a-zA-Z]{2,3}[A-Z]{2})\.md$')
+
+        for filename in os.listdir(prompt_dir):
+            match = lang_pattern.match(filename)
+            if match:
+                languages.add(match.group(1))
+        
+        logger.info(f"Found rule files for languages: {sorted(list(languages))}")
+        return sorted(list(languages))
+    except Exception as e:
+        logger.exception(f"Error scanning for rule languages: {e}")
+        return []
+
+# === End Helper Functions ===
 
 # --- Helper function to get rule files status ---
 def get_rule_files():
@@ -356,130 +384,189 @@ def create_app():
     def start_job():
         logger.info("Received request to /start_job")
         try:
-            if 'file' not in request.files:
-                return jsonify({"error": "No file part"}), 400
-            file = request.files['file']
-            if not file or not file.filename:
-                return jsonify({"error": "No selected file or filename missing"}), 400
-            
-            # Ensure filename is secure
-            filename = secure_filename(file.filename)
-            
-            # Get form data
-            selected_languages = request.form.getlist('languages') # Assuming name="languages"
-            mode = request.form.get('mode', 'THREE_STAGE') # Default to THREE_STAGE if not provided
+            # --- NEW: Determine Input Mode --- #
+            input_mode = request.form.get('input_mode', 'csv') # Default to 'csv' if not provided
+            source_phrase = request.form.get('source_phrase', '').strip()
+            file = request.files.get('file') # Use .get() to handle missing file gracefully
+
+            logger.info(f"Input mode: {input_mode}, File provided: {file is not None and file.filename != ''}, Phrase provided: {bool(source_phrase)}")
+
+            # --- Get Common Form Data --- #
+            selected_languages = request.form.getlist('languages') # For CSV mode, this comes from file; for phrase mode, it's from checkboxes
+            mode = request.form.get('mode', 'FOUR_STAGE') # Update default based on UI
             one_stage_api = request.form.get('one_stage_api', config.DEFAULT_API)
-            one_stage_model = request.form.get('one_stage_model') or None 
+            one_stage_model = request.form.get('one_stage_model') or None
             s1_api = request.form.get('s1_api', config.STAGE1_API)
             s1_model = request.form.get('s1_model') or None
             s2_api = request.form.get('s2_api', config.STAGE2_API)
             s2_model = request.form.get('s2_model') or None
             s3_api = request.form.get('s3_api', config.STAGE3_API)
             s3_model = request.form.get('s3_model') or None
-            # Get Vector Store preference
-            use_vs = True if mode == 'FOUR_STAGE' else request.form.get('use_vector_store') == 'true' # Checkbox value is 'true' when checked
-            # --- NEW: Get Batch Prompt ---
-            batch_prompt_text = request.form.get('batch_prompt', '').strip()
-            # --- NEW: Get Update Strategy --- 
-            update_strategy = request.form.get('update_strategy', 'retranslate') # Default to 'retranslate'
-            # --------------------------------
-            
-            logger.info(f"Form Data Received - Mode: {mode}, Strategy: {update_strategy}, Languages: {selected_languages}, Use VS: {use_vs}")
-            if not selected_languages:
-                 return jsonify({"error": "No languages selected"}), 400
+            s0_model = request.form.get('s0_model') or config.S0_MODEL # For Four Stage
+            s1_api_four = request.form.get('s1_api_four', config.STAGE1_API)
+            s1_model_four = request.form.get('s1_model_four') or None
+            s2_api_four = request.form.get('s2_api_four', config.STAGE2_API)
+            s2_model_four = request.form.get('s2_model_four') or None
+            s3_api_four = request.form.get('s3_api_four', config.STAGE3_API)
+            s3_model_four = request.form.get('s3_model_four') or None
 
-            # Save file temporarily
-            temp_dir = "temp_uploads"
-            os.makedirs(temp_dir, exist_ok=True)
-            temp_filename = f"{uuid.uuid4()}_{filename}" # Use secure filename
-            file_path = os.path.join(temp_dir, temp_filename)
-            file.save(file_path)
-            logger.info(f"Temporarily saved uploaded file to {file_path}")
-            
-            # Construct mode_config dictionary based on selected mode
-            if mode == "ONE_STAGE":
-                mode_config = {
-                    "mode": mode, 
-                    "languages": selected_languages, 
-                    "default_api": one_stage_api, 
-                    "s1_api": one_stage_api, "s1_model": one_stage_model,
-                    "s2_api": None, "s2_model": None,
-                    "s3_api": None, "s3_model": None,
-                    "use_vs": use_vs, # Add VS preference
-                    "batch_prompt": batch_prompt_text,
-                    "update_strategy": update_strategy # <<< ADD STRATEGY >>>
-                 }
-            elif mode == "THREE_STAGE":
-                 mode_config = {
-                    "mode": mode, 
-                    "languages": selected_languages, 
-                    "default_api": one_stage_api, # Pass the API selected if mode was ONE_STAGE previously
-                    "s1_api": s1_api,
-                    "s2_api": s2_api,
-                    "s3_api": s3_api,
-                    "s1_model": s1_model, 
-                    "s2_model": s2_model,
-                    "s3_model": s3_model,
-                    "use_vs": use_vs, # Add VS preference
-                    "batch_prompt": batch_prompt_text,
-                    "update_strategy": update_strategy # <<< ADD STRATEGY >>>
+            use_vs = True if mode == 'FOUR_STAGE' else request.form.get('use_vector_store') == 'true'
+            batch_prompt_text = request.form.get('batch_prompt', '').strip()
+            update_strategy = request.form.get('update_strategy', 'update_existing') # Update default based on UI
+
+            # --- Initialize variables for processing --- #
+            file_path_to_process = None
+            original_filename = "quick_translate.csv" # Default filename for phrase mode
+            batch_languages = []
+            cleanup_file_path = None # Path to delete after processing
+
+            # --- Handle SINGLE PHRASE mode --- #
+            if input_mode == 'phrase':
+                logger.info("Processing in single-phrase mode.")
+                if not source_phrase:
+                    return jsonify({"error": "Source phrase cannot be empty for single phrase mode."}), 400
+                if not selected_languages:
+                     return jsonify({"error": "No languages selected for single phrase mode."}), 400
+
+                # Force retranslate strategy for single phrase
+                update_strategy = 'retranslate'
+                logger.info(f"Forcing update_strategy to '{update_strategy}' for single phrase mode.")
+
+                batch_languages = selected_languages # Use languages selected in the form
+
+                # Create an in-memory CSV representation
+                # Required columns: Record ID, Context, DeveloperNotes, src_enUS
+                csv_data = {
+                    'Record ID': ['quick_phrase_1'],
+                    'Context': [''],
+                    'DeveloperNotes': ['Quick Translate Feature'],
+                    config.SOURCE_COLUMN: [source_phrase]
                 }
-            elif mode == "FOUR_STAGE":
-                # Need to get the specific S1/S2/S3 APIs/models for four stage
-                s0_model = request.form.get('s0_model') or config.S0_MODEL
-                s1_api_four = request.form.get('s1_api_four', config.STAGE1_API)
-                s1_model_four = request.form.get('s1_model_four') or None
-                s2_api_four = request.form.get('s2_api_four', config.STAGE2_API)
-                s2_model_four = request.form.get('s2_model_four') or None
-                s3_api_four = request.form.get('s3_api_four', config.STAGE3_API)
-                s3_model_four = request.form.get('s3_model_four') or None
-                # VS is always true for four stage
-                mode_config = {
-                    "mode": mode,
-                    "s0_model": s0_model,
-                    "s1_api": s1_api_four,
-                    "s1_model": s1_model_four,
-                    "s2_api": s2_api_four,
-                    "s2_model": s2_model_four,
-                    "s3_api": s3_api_four,
-                    "s3_model": s3_model_four,
-                    "batch_prompt": batch_prompt_text,
-                    "use_vs": True,
-                    "update_strategy": update_strategy # <<< ADD STRATEGY >>>
-                }
+                df = pd.DataFrame(csv_data)
+                string_io = io.StringIO()
+                df.to_csv(string_io, index=False, encoding='utf-8')
+                string_io.seek(0)
+
+                # Save this in-memory CSV to a temporary file for prepare_batch
+                temp_dir = "temp_uploads"
+                os.makedirs(temp_dir, exist_ok=True)
+                temp_filename = f"{uuid.uuid4()}_quick_translate.csv"
+                file_path_to_process = os.path.join(temp_dir, temp_filename)
+                cleanup_file_path = file_path_to_process # Mark for cleanup
+
+                with open(file_path_to_process, 'w', encoding='utf-8') as f:
+                    f.write(string_io.getvalue())
+                logger.info(f"Saved in-memory single-phrase CSV to temporary file: {file_path_to_process}")
+
+            # --- Handle CSV UPLOAD mode --- #
+            elif file and file.filename != '' and allowed_file(file.filename):
+                logger.info("Processing in CSV upload mode.")
+                original_filename = secure_filename(file.filename)
+                temp_dir = "temp_uploads"
+                os.makedirs(temp_dir, exist_ok=True)
+                temp_filename = f"{uuid.uuid4()}_{original_filename}"
+                file_path_to_process = os.path.join(temp_dir, temp_filename)
+                cleanup_file_path = file_path_to_process # Mark for cleanup
+                file.save(file_path_to_process)
+                logger.info(f"Temporarily saved uploaded CSV file to {file_path_to_process}")
+
+                # Determine languages from CSV header for batch processing
+                try:
+                    df_header = pd.read_csv(file_path_to_process, nrows=0)
+                    header = df_header.columns.tolist()
+                    potential_langs = {col[3:] for col in header if col.startswith("tg_")}
+                    # Use only languages selected in UI that *also* exist in the file
+                    batch_languages = [lang for lang in selected_languages if lang in potential_langs]
+                    if not batch_languages:
+                         # If user selected languages not in file, should we error or proceed with empty?
+                         logger.warning(f"Selected languages {selected_languages} not found as columns in {original_filename}. Proceeding with empty language list (will likely result in 'completed_empty' status).")
+                         # Returning error is safer
+                         return jsonify({"error": f"Selected languages {selected_languages} not found as columns (tg_*) in the uploaded CSV."}), 400
+                except Exception as e:
+                    logger.exception(f"Error reading header from uploaded CSV {file_path_to_process}")
+                    return jsonify({"error": "Failed to read header from uploaded CSV."}), 500
             else:
-                logger.error(f"Invalid mode received: {mode}")
-                return jsonify({"error": "Invalid translation mode selected"}), 400
-            
-            # Call backend prepare_batch
-            # Pass the actual filename for storage, but use temp path for processing
+                # Invalid state - neither valid phrase nor valid file upload
+                logger.warning("Invalid request to /start_job: Neither valid phrase nor valid file provided.")
+                error_msg = "Invalid input: Provide either a source phrase or upload a valid CSV file."
+                if file and not allowed_file(file.filename):
+                    error_msg = "Invalid file type. Only CSV files are allowed."
+                elif file and file.filename == '':
+                    error_msg = "No file selected."
+                return jsonify({"error": error_msg}), 400
+
+            # --- Construct Mode Config (common to both modes) --- #
+            logger.info(f"Constructing mode config - Mode: {mode}, Strategy: {update_strategy}, Languages: {batch_languages}, Use VS: {use_vs}")
+            mode_config = {
+                "mode": mode,
+                "languages": batch_languages, # Use languages determined by mode
+                "use_vs": use_vs,
+                "batch_prompt": batch_prompt_text,
+                "update_strategy": update_strategy,
+                 # Add API/Model details based on actual mode selected
+                "s0_model": s0_model if mode == "FOUR_STAGE" else None,
+                "s1_api": one_stage_api if mode == "ONE_STAGE" else (s1_api_four if mode == "FOUR_STAGE" else s1_api),
+                "s1_model": one_stage_model if mode == "ONE_STAGE" else (s1_model_four if mode == "FOUR_STAGE" else s1_model),
+                "s2_api": s2_api_four if mode == "FOUR_STAGE" else (s2_api if mode == "THREE_STAGE" else None),
+                "s2_model": s2_model_four if mode == "FOUR_STAGE" else (s2_model if mode == "THREE_STAGE" else None),
+                "s3_api": s3_api_four if mode == "FOUR_STAGE" else (s3_api if mode == "THREE_STAGE" else None),
+                "s3_model": s3_model_four if mode == "FOUR_STAGE" else (s3_model if mode == "THREE_STAGE" else None)
+            }
+            # Add input_type to config for tracking
+            mode_config['input_type'] = input_mode
+            logger.debug(f"Final mode_config: {mode_config}")
+
+            # --- Call prepare_batch --- #
+            if not file_path_to_process:
+                 logger.error("Internal error: file_path_to_process is None before calling prepare_batch.")
+                 return jsonify({"error": "Internal server error preparing job."}), 500
+
+            # <<< ADD DETAILED DEBUGGING BEFORE PREPARE BATCH >>>
+            logger.debug(f"DEBUG PRE-PREPARE - Mode: {mode}")
+            logger.debug(f"DEBUG PRE-PREPARE - Selected Languages: {batch_languages}")
+            logger.debug(f"DEBUG PRE-PREPARE - Form value one_stage_api: {request.form.get('one_stage_api')}")
+            logger.debug(f"DEBUG PRE-PREPARE - Variable one_stage_api: {one_stage_api}")
+            logger.debug(f"DEBUG PRE-PREPARE - config.DEFAULT_API: {config.DEFAULT_API}")
+            logger.debug(f"DEBUG PRE-PREPARE - config.STAGE1_API: {config.STAGE1_API}")
+            logger.debug(f"DEBUG PRE-PREPARE - Constructed mode_config: {mode_config}")
+            # <<< END DEBUGGING >>>
+
             batch_id = translation_service.prepare_batch(
-                 input_file_path=file_path, 
-                 original_filename=filename,
-                 selected_languages=selected_languages, 
-                 mode_config=mode_config # Pass the config including batch_prompt
+                 input_file_path=file_path_to_process,
+                 original_filename=original_filename, # Pass original/generated filename
+                 selected_languages=batch_languages, # Pass determined languages
+                 mode_config=mode_config
             )
 
             if batch_id:
-                logger.info(f"Batch {batch_id} prepared. Starting background thread...")
+                logger.info(f"Batch {batch_id} prepared for {input_mode} input. Starting background thread...")
                 thread = threading.Thread(
-                    target=translation_service.run_batch_background, 
+                    target=translation_service.run_batch_background,
                     args=(batch_id,)
                 )
-                thread.daemon = True # Allow app to exit even if thread hangs (optional)
+                thread.daemon = True
                 thread.start()
+                # Clear cleanup path *only* if thread started successfully
+                cleanup_file_path = None 
                 return jsonify({"message": "Job started successfully", "batch_id": batch_id}), 200
             else:
-                logger.error("Batch preparation failed (prepare_batch returned None).")
-                # Clean up temp file if batch prep failed
-                try: os.remove(file_path) 
-                except OSError as e: logger.warning(f"Could not remove temp file {file_path}: {e}")
-                return jsonify({"error": "Batch preparation failed. Check logs and input file."}) , 500
-                
+                logger.error(f"Batch preparation failed for {input_mode} input (prepare_batch returned None). File: {file_path_to_process}")
+                # Cleanup handled in finally block
+                return jsonify({"error": "Batch preparation failed. Check logs and input."}) , 500
+
         except Exception as e:
-             logger.exception(f"Error in /start_job: {e}") # Use exception for traceback
+             logger.exception(f"Error in /start_job: {e}")
+             # Cleanup potentially needed here too, handled by finally
              return jsonify({"error": "An unexpected error occurred processing the request."}), 500
-             
+        finally:
+             # --- Cleanup temporary file --- #
+             if cleanup_file_path and os.path.exists(cleanup_file_path):
+                 logger.info(f"Cleaning up temporary file: {cleanup_file_path}")
+                 try:
+                     os.remove(cleanup_file_path)
+                 except OSError as e:
+                     logger.error(f"Could not remove temp file {cleanup_file_path}: {e}")
+
     @app.route('/status/<batch_id>')
     def get_batch_status(batch_id):
         db_path = config.DATABASE_FILE
@@ -1285,6 +1372,19 @@ def create_app():
             logger.exception(f"Error fetching status for Set ID {set_id}: {e}")
             return jsonify({"error": "An internal server error occurred"}), 500
     # --- End AJAX status endpoint ---
+
+    # --- API Endpoint for Frontend --- #
+    @app.route('/get_available_languages', methods=['GET'])
+    def get_available_languages_route():
+        """Returns a JSON list of language codes for which rule files exist."""
+        logger.info("Received request for /get_available_languages")
+        try:
+            languages = get_available_rule_languages()
+            return jsonify({"available_languages": languages})
+        except Exception as e:
+            logger.exception("Error in /get_available_languages route")
+            return jsonify({"error": "Failed to retrieve available languages"}), 500
+    # --- End API Endpoint --- #
 
     @app.route('/placeholder') # Keep or remove this placeholder?
     def placeholder():

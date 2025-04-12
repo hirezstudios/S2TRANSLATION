@@ -112,7 +112,7 @@
                         <option value="{{ api }}" {% if api == default_apis.ONE_STAGE %}selected{% endif %}>{{ api }}</option>
                         {% endfor %}
                     </select>
-                    <input type="text" class="form-control form-control-sm" name="one_stage_model" placeholder="Optional Model Override">
+                    <input type="text" class="form-control form-control-sm" name="one_stage_model" placeholder="Optional Model Override (Default: {{ default_models.ONE_STAGE or 'N/A' }})">
                 </div>
                 <div id="api-config-three-stage" style="display: block;" class="mt-2 p-3 border rounded bg-light"> {# Initially shown #}
                      <h6>Three Stage APIs</h6>
@@ -122,7 +122,7 @@
                         <option value="{{ api }}" {% if api == default_apis.S1 %}selected{% endif %}>{{ api }}</option>
                         {% endfor %}
                      </select>
-                     <input type="text" class="form-control form-control-sm mb-2" name="s1_model" placeholder="S1 Model Override">
+                     <input type="text" class="form-control form-control-sm mb-2" name="s1_model" placeholder="S1 Model Override (Default: {{ default_models.S1 or 'N/A' }})">
                      
                      <label class="form-label small">Stage 2 API:</label>
                      <select class="form-select form-select-sm mb-1" name="s2_api" id="s2_api">
@@ -130,7 +130,7 @@
                         <option value="{{ api }}" {% if api == default_apis.S2 %}selected{% endif %}>{{ api }}</option>
                         {% endfor %}
                      </select>
-                     <input type="text" class="form-control form-control-sm mb-2" name="s2_model" placeholder="S2 Model Override">
+                     <input type="text" class="form-control form-control-sm mb-2" name="s2_model" placeholder="S2 Model Override (Default: {{ default_models.S2 or 'N/A' }})">
 
                      <label class="form-label small">Stage 3 API:</label>
                      <select class="form-select form-select-sm mb-1" name="s3_api" id="s3_api">
@@ -138,7 +138,7 @@
                         <option value="{{ api }}" {% if api == default_apis.S3 %}selected{% endif %}>{{ api }}</option>
                         {% endfor %}
                      </select>
-                     <input type="text" class="form-control form-control-sm" name="s3_model" placeholder="S3 Model Override">
+                     <input type="text" class="form-control form-control-sm" name="s3_model" placeholder="S3 Model Override (Default: {{ default_models.S3 or 'N/A' }})">
                 </div>
                 <!-- Add Four Stage Config Section -->
                 <div id="api-config-four-stage" style="display: none;" class="mt-2 p-3 border rounded bg-light"> 
@@ -148,7 +148,7 @@
                      <select class="form-select form-select-sm mb-1" name="s0_api" id="s0_api" disabled>
                          <option value="OPENAI" selected>OPENAI</option>
                      </select>
-                     <input type="text" class="form-control form-control-sm mb-2" name="s0_model" placeholder="S0 Model Override (Default: {{ config.S0_MODEL }})">
+                     <input type="text" class="form-control form-control-sm mb-2" name="s0_model" placeholder="S0 Model Override (Default: {{ default_models.S0 or 'N/A' }})">
                      
                      <label class="form-label small">Stage 1 API:</label>
                      <select class="form-select form-select-sm mb-1" name="s1_api_four" id="s1_api_four"> {# Use unique IDs for four stage #}
@@ -156,7 +156,7 @@
                         <option value="{{ api }}" {% if api == default_apis.S1 %}selected{% endif %}>{{ api }}</option>
                         {% endfor %}
                      </select>
-                     <input type="text" class="form-control form-control-sm mb-2" name="s1_model_four" placeholder="S1 Model Override">
+                     <input type="text" class="form-control form-control-sm mb-2" name="s1_model_four" placeholder="S1 Model Override (Default: {{ default_models.S1 or 'N/A' }})">
                      
                      <label class="form-label small">Stage 2 API:</label>
                      <select class="form-select form-select-sm mb-1" name="s2_api_four" id="s2_api_four">
@@ -164,7 +164,7 @@
                         <option value="{{ api }}" {% if api == default_apis.S2 %}selected{% endif %}>{{ api }}</option>
                         {% endfor %}
                      </select>
-                     <input type="text" class="form-control form-control-sm mb-2" name="s2_model_four" placeholder="S2 Model Override">
+                     <input type="text" class="form-control form-control-sm mb-2" name="s2_model_four" placeholder="S2 Model Override (Default: {{ default_models.S2 or 'N/A' }})">
 
                      <label class="form-label small">Stage 3 API:</label>
                      <select class="form-select form-select-sm mb-1" name="s3_api_four" id="s3_api_four">
@@ -172,7 +172,7 @@
                         <option value="{{ api }}" {% if api == default_apis.S3 %}selected{% endif %}>{{ api }}</option>
                         {% endfor %}
                      </select>
-                     <input type="text" class="form-control form-control-sm" name="s3_model_four" placeholder="S3 Model Override">
+                     <input type="text" class="form-control form-control-sm" name="s3_model_four" placeholder="S3 Model Override (Default: {{ default_models.S3 or 'N/A' }})">
                 </div>
             </div>
         </div>

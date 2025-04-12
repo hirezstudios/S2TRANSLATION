@@ -315,15 +315,36 @@ def create_app():
 
     @app.route('/')
     def index():
-        # Pass available APIs for dynamic population? Or handle in JS?
-        # Let's pass defaults for now.
+        # Determine default models based on default APIs in config
+        def get_default_model(api_name):
+            if api_name == 'OPENAI':
+                return config.OPENAI_MODEL
+            elif api_name == 'GEMINI':
+                return config.GEMINI_MODEL
+            elif api_name == 'PERPLEXITY':
+                return config.PPLX_MODEL
+            return None # Or some default string like 'N/A'
+
+        # Pass available APIs and the calculated default API selections and default model names
         default_apis = {
-            'ONE_STAGE': config.DEFAULT_API,
+            'ONE_STAGE': config.STAGE1_API, # ONE_STAGE uses S1 config
             'S1': config.STAGE1_API,
             'S2': config.STAGE2_API,
             'S3': config.STAGE3_API
+            # S0 API is always OPENAI
         }
-        return render_template('index.html', valid_apis=config.VALID_APIS, default_apis=default_apis)
+        default_models = {
+            'S0': config.S0_MODEL, # S0 is explicitly configured
+            'S1': get_default_model(config.STAGE1_API),
+            'S2': get_default_model(config.STAGE2_API),
+            'S3': get_default_model(config.STAGE3_API),
+            'ONE_STAGE': get_default_model(config.STAGE1_API) # ONE_STAGE uses S1
+        }
+        
+        return render_template('index.html', 
+                               valid_apis=config.VALID_APIS, 
+                               default_apis=default_apis,
+                               default_models=default_models) # Pass models to template
 
     @app.route('/upload_temp_file', methods=['POST'])
     def upload_temp_file():

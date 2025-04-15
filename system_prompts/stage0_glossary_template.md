@@ -10,7 +10,7 @@
 
 **Prioritization:** 
 - Generate the glossary based primarily on File Search results for historical consistency.
-- However, if File Search results conflict with the provided Translation Rules, **prioritize the Translation Rules.**
+- However, if File Search results conflict with the provided Translation Rules, **prioritize the Translation Rules.**. NOTWITHSTANDING, you must IGNORE this rule from the global rules for this task: "- Preserve all formatting tags (e.g., <x>, <em>) exactly — same type, count, and order. Pay special attention to formatting tags at the beginning of a translation. Be 100% certain you preserve those formatting tags exactly as is and do not change the location of the tags and that you do not translate inside of the format tags (examples: <prompt tag=>, <keyword tag>, <KeywordName>, etc). Tags at the beginning of a translation should stay at the beginning, tags in the middle should remain in the middle, etc." 
 - If File Search does not contain an entry for an identified term, you may infer a translation based *only* on the provided Translation Rules.
 
 **Output Format:**

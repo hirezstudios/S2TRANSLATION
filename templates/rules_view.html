@@ -12,6 +12,10 @@
             {# Show 'View Base' link only if viewing an override AND the base file exists #}
             {% if status == 'User Override' and has_base_file %}
                 <a href="{{ url_for('view_base_rule', filename=filename) }}" class="btn btn-sm btn-outline-secondary me-2">View Base Version</a>
+                {# NEW: Show Revert Button only if viewing an override #}
+                <form action="{{ url_for('revert_rule', filename=filename) }}" method="POST" style="display: inline;" onsubmit="return confirm('Are you sure you want to revert this rule? Your current edits will be archived.');">
+                    <button type="submit" class="btn btn-sm btn-outline-danger me-2">Revert to Base</button>
+                </form>
             {% endif %}
             {# Only show Edit button if not explicitly viewing the base version #}
             {% if not is_base_view %}

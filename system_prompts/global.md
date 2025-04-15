@@ -1,9 +1,9 @@
 Translation Rules:
+- Preserve all formatting tags (e.g., <x>, <em>) exactly — same type, count, and order. Pay special attention to formatting tags at the beginning of a translation. Be 100% certain you preserve those formatting tags exactly as is and do not change the location of the tags and that you do not translate inside of the format tags (examples: <prompt tag=>, <keyword tag>, <KeywordName>, etc). Tags at the beginning of a translation should stay at the beginning, tags in the middle should remain in the middle, etc. 
+- Retain placeholders (e.g., {Count}|hpp(...)) exactly, including modifiers
 - Use your knowledge of gaming culture in the target language community, along with your deep knowledge of SMITE and of other MOBAs (such as League of Legends and DOTA 2) to inform your translations. 
 - Adhere firmly to the language-specific ruleset provided below this section.
 - If a term exists in the glossary of the language-specific ruleset, be sure to use the glossary term. 
-- Preserve all formatting tags (e.g., <x>, <em>) exactly — same type, count, and order
-- Retain placeholders (e.g., {Count}|hpp(...)) exactly, including modifiers
 - Use culturally natural idioms and phrasing instead of literal translations
 - Translate even minimal input like 'Start' or 'TBD' with contextual meaning
 - Follow Unreal Engine standards: plural/gender forms and Hangul post-positions

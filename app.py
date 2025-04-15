@@ -315,15 +315,15 @@ def create_app():
 
     @app.route('/')
     def index():
-        # Determine default models based on default APIs in config
-        def get_default_model(api_name):
+        # Determine default models based on default APIs AND stage-specific overrides in config
+        def get_default_model_for_api(api_name):
             if api_name == 'OPENAI':
                 return config.OPENAI_MODEL
             elif api_name == 'GEMINI':
                 return config.GEMINI_MODEL
             elif api_name == 'PERPLEXITY':
                 return config.PPLX_MODEL
-            return None # Or some default string like 'N/A'
+            return None
 
         # Pass available APIs and the calculated default API selections and default model names
         default_apis = {
@@ -331,14 +331,16 @@ def create_app():
             'S1': config.STAGE1_API,
             'S2': config.STAGE2_API,
             'S3': config.STAGE3_API
-            # S0 API is always OPENAI
         }
+        
+        # Prioritize stage-specific model overrides from config, then fall back to API default
         default_models = {
             'S0': config.S0_MODEL, # S0 is explicitly configured
-            'S1': get_default_model(config.STAGE1_API),
-            'S2': get_default_model(config.STAGE2_API),
-            'S3': get_default_model(config.STAGE3_API),
-            'ONE_STAGE': get_default_model(config.STAGE1_API) # ONE_STAGE uses S1
+            'S1': config.STAGE1_MODEL_OVERRIDE if config.STAGE1_MODEL_OVERRIDE else get_default_model_for_api(config.STAGE1_API),
+            'S2': config.STAGE2_MODEL_OVERRIDE if config.STAGE2_MODEL_OVERRIDE else get_default_model_for_api(config.STAGE2_API),
+            'S3': config.STAGE3_MODEL_OVERRIDE if config.STAGE3_MODEL_OVERRIDE else get_default_model_for_api(config.STAGE3_API),
+            # ONE_STAGE uses the same logic as S1
+            'ONE_STAGE': config.STAGE1_MODEL_OVERRIDE if config.STAGE1_MODEL_OVERRIDE else get_default_model_for_api(config.STAGE1_API) 
         }
         
         return render_template('index.html', 
@@ -1148,6 +1150,50 @@ def create_app():
                                    is_editing_base=is_editing_base) # Pass flag to template
     # --- End Rules Routes ---
 
+    # --- NEW: Route to Revert Rule Override --- 
+    @app.route('/rules/revert/<path:filename>', methods=['POST'])
+    def revert_rule(filename):
+        """Reverts a user override back to the system default by archiving the user file."""
+        logger.info(f"Received request to revert rule: {filename}")
+
+        user_file_path = os.path.abspath(os.path.join(USER_PROMPT_DIR, filename))
+        target_archive_dir = USER_ARCHIVE_DIR
+
+        # Security Checks
+        if '..' in filename or filename.startswith('/') or not user_file_path.startswith(os.path.abspath(USER_PROMPT_DIR)):
+            logger.warning(f"Potentially insecure filename detected for revert: {filename}")
+            flash("Invalid filename provided.", "danger")
+            return redirect(url_for('list_rules'))
+
+        if not os.path.exists(user_file_path):
+            flash(f"No user override exists for '{filename}' to revert.", "warning")
+            return redirect(url_for('view_rule', filename=filename))
+
+        try:
+            # Ensure archive directory exists
+            os.makedirs(target_archive_dir, exist_ok=True)
+
+            # Create archive filename
+            archive_filename = f"{os.path.splitext(filename)[0]}_{datetime.now().strftime('%Y%m%d%H%M%S')}.md"
+            archive_file_path = os.path.join(target_archive_dir, archive_filename)
+
+            # Move the user file to the archive
+            os.rename(user_file_path, archive_file_path) # More atomic than copy/delete
+            
+            logger.info(f"Successfully reverted {filename} by archiving override to {archive_file_path}")
+            flash(f"Successfully reverted '{filename}' to system base version.", "success")
+
+        except OSError as e:
+             logger.exception(f"Error reverting rule {filename}: {e}")
+             flash(f"Error reverting rule '{filename}': {e}", "danger")
+        except Exception as e:
+             logger.exception(f"Unexpected error reverting rule {filename}: {e}")
+             flash(f"An unexpected error occurred while reverting '{filename}'.", "danger")
+
+        # Redirect back to the view page, which will now show the base version
+        return redirect(url_for('view_rule', filename=filename))
+    # --- End Revert Route --- 
+
     # --- Admin Routes --- 
     @app.route('/admin')
     def admin_page():
@@ -1411,6 +1457,22 @@ def create_app():
     def placeholder():
         return "Route not implemented yet.", 501
         
+    # <<< Add Cache Control Headers (Always) >>>
+    @app.after_request
+    def add_header(response):
+        # Apply cache-disabling headers regardless of debug mode
+        # if app.debug: <<< REMOVE CHECK >>>
+        response.headers['Cache-Control'] = 'no-cache, no-store, must-revalidate'
+        response.headers['Pragma'] = 'no-cache'
+        response.headers['Expires'] = '0'
+        # Setting Cache-Control again might override the previous, ensure all directives are intended.
+        # Let's combine them or choose the most effective set.
+        # Using 'no-cache, no-store, must-revalidate' is generally robust.
+        # Removing the second Cache-Control set for clarity unless specifically needed.
+        # response.headers['Cache-Control'] = 'public, max-age=0' 
+        return response
+    # <<< End Cache Control >>>
+    
     return app
 
 # Allow running directly for development

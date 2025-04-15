@@ -38,6 +38,12 @@
         
         <button type="submit" class="btn btn-primary">Save Changes</button>
         <a href="{{ url_for('view_rule', filename=filename) }}" class="btn btn-secondary">Cancel</a>
+        {# NEW: Add Revert button only if editing an existing override #}
+        {% if not is_editing_base %}
+            <form action="{{ url_for('revert_rule', filename=filename) }}" method="POST" style="display: inline; margin-left: 10px;" onsubmit="return confirm('Are you sure you want to discard these edits and revert to the base system rule? Your current user version will be archived.');">
+                 <button type="submit" class="btn btn-outline-danger">Revert to Base</button>
+            </form>
+        {% endif %}
     </form>
 
 {% endblock %}

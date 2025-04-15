@@ -2,7 +2,11 @@ import os
 from dotenv import load_dotenv
 import logging
 
-load_dotenv()
+# <<< Explicitly specify .env path >>>
+dotenv_path = os.path.join(os.path.dirname(__file__), '..', '.env') # Assumes config.py is in src/
+# <<< Add verbose=True >>>
+loaded = load_dotenv(dotenv_path=dotenv_path, verbose=True)
+# <<< End explicit path & verbose >>>
 
 # --- Language Configuration ---
 LANGUAGE_CODE = "esLA" # Default, will be overridden by selections
@@ -42,6 +46,19 @@ STAGE1_MODEL_OVERRIDE = os.getenv("STAGE1_MODEL")
 STAGE2_MODEL_OVERRIDE = os.getenv("STAGE2_MODEL")
 STAGE3_MODEL_OVERRIDE = os.getenv("STAGE3_MODEL")
 S0_MODEL = os.getenv("S0_MODEL", "gpt-4o") # Default to gpt-4o if not set
+
+# <<< REMOVE DEBUG PRINT >>>
+# print(f"DEBUG config.py - STAGE1_API: {STAGE1_API}")
+# print(f"DEBUG config.py - STAGE2_API: {STAGE2_API}")
+# print(f"DEBUG config.py - STAGE3_API: {STAGE3_API}")
+# print(f"DEBUG config.py - STAGE1_MODEL_OVERRIDE: {STAGE1_MODEL_OVERRIDE}")
+# print(f"DEBUG config.py - STAGE2_MODEL_OVERRIDE: {STAGE2_MODEL_OVERRIDE}")
+# print(f"DEBUG config.py - STAGE3_MODEL_OVERRIDE: {STAGE3_MODEL_OVERRIDE}")
+# print(f"DEBUG config.py - OPENAI_MODEL: {OPENAI_MODEL}")
+# print(f"DEBUG config.py - GEMINI_MODEL: {GEMINI_MODEL}")
+# print(f"DEBUG config.py - PPLX_MODEL: {PPLX_MODEL}")
+# <<< END DEBUG PRINT >>>
+
 STAGE1_PROMPT_FILE_TPL = "system_prompts/tg_{lang_code}.md" # Template path
 STAGE2_TEMPLATE_FILE = "system_prompts/stage2_evaluate_template.md" 
 STAGE3_TEMPLATE_FILE = "system_prompts/stage3_refine_template.md" 

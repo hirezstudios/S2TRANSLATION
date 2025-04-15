@@ -17,7 +17,6 @@
 2.  Apply the requested changes to the **Initial Translation**.
 3.  Ensure the revised translation uses terms from the **GENERATED GLOSSARY** (if provided), unless the feedback or general **Translation Rules** require otherwise.
 4.  Double-check that the final revision adheres to all other **Translation Rules** (grammar, style, capitalization, etc.).
-5.  IMPORTANT: Do NOT make any additional changes to the translation other than those suggested in the Evaluation Feedback. 
 
 **Output:** Provide ONLY the final, revised <<TARGET_LANGUAGE_NAME>> translation. Do not include explanations, apologies, or the original text.
 

@@ -32,7 +32,7 @@
         // Pass Flask data to JavaScript
         // The line below uses Jinja templating. Linters might flag this as an error,
         // but it is correct for rendering Flask data into JavaScript.
-        const batchData = {{ batches|tojson }};
+        const batchData = {{ batches|tojson|safe }};
         console.log("Batch data received:", batchData);
 
         // Custom formatter for batch status badges
@@ -64,8 +64,59 @@
         const actionFormatter = function(cell, formatterParams, onRendered){
             const batchId = cell.getRow().getData().batch_id;
             const resultsUrl = "{{ url_for('view_results', batch_id='BATCH_ID_PLACEHOLDER') }}".replace('BATCH_ID_PLACEHOLDER', batchId);
-            return `<a href="${resultsUrl}" class="btn btn-sm btn-primary">View Results</a>`;
+            let buttons = `<a href="${resultsUrl}" class="btn btn-sm btn-primary">View Results</a>`;
+            
+            // Add debug logging
+            const status = cell.getRow().getData().status;
+            const conditionMet = (status === 'pending' || status === 'processing');
+            // console.log(`DEBUG History Formatter: Batch ${batchId}, Status: '${status}', Condition Met: ${conditionMet}`); // <<< Remove debug log
+
+            // Add cancel button logic
+            if (conditionMet) { // Use the evaluated condition
+                buttons += `<button type="button" class="btn btn-sm btn-warning" style="margin-left: 5px;" onclick="requestCancelJob('${batchId}')">Cancel Job</button>`;
+            }
+            
+            return buttons;
         };
+
+        // <<< NEW: Function to handle cancel request >>>
+        async function requestCancelJob(batchId) {
+            if (!confirm(`Are you sure you want to request cancellation for Batch ${batchId}?`)) {
+                return; // User cancelled the confirmation
+            }
+            
+            const url = "{{ url_for('cancel_job', batch_id='B_ID') }}".replace('B_ID', batchId);
+            
+            try {
+                // Show some visual feedback - maybe disable button, show spinner?
+                // For now, just log and send request.
+                console.log(`Sending POST request to ${url} to cancel job...`);
+                
+                const response = await fetch(url, {
+                    method: 'POST',
+                    headers: {
+                        // Add CSRF token header if Flask-WTF/CSRFProtect is enabled later
+                        // 'X-CSRFToken': 'VALUE_HERE' // Remove Jinja tag
+                    }
+                });
+
+                // Check response (optional, flash messages are handled by redirect)
+                if (response.ok) {
+                    // Request was received by backend (flash message shown on redirect)
+                    console.log(`Cancellation request sent for ${batchId}.`);
+                    // Reload the page to see updated status/flash messages
+                    window.location.reload(); 
+                } else {
+                    // Maybe show an error to the user if the POST itself failed?
+                    console.error(`Failed to send cancellation request for ${batchId}. Status: ${response.status}`);
+                    alert(`Error: Could not send cancellation request (HTTP ${response.status}). Check console.`);
+                }
+            } catch (error) {
+                console.error('Error sending cancellation request:', error);
+                alert('An error occurred while trying to cancel the job. Check console.');
+            }
+        }
+        // <<< END NEW FUNCTION >>>
 
         // Initialize Tabulator
         const table = new Tabulator("#history-table", {
@@ -115,7 +166,7 @@
                     title: "Actions", 
                     formatter: actionFormatter, 
                     hozAlign: "center", 
-                    width: 120, 
+                    width: 220, // <<< INCREASED WIDTH >>>
                     headerSort: false 
                 }
             ],

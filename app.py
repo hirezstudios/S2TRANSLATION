@@ -1473,6 +1473,32 @@ def create_app():
         return response
     # <<< End Cache Control >>>
     
+    # --- NEW: Cancel Job Route --- #
+    @app.route('/cancel_job/<batch_id>', methods=['POST'])
+    def cancel_job(batch_id):
+        """Attempts to cancel a running or pending job by setting its status to 'cancelling'."""
+        logger.info(f"Received request to cancel job: {batch_id}")
+        db_path = config.DATABASE_FILE
+        try:
+            batch_info = db_manager.get_batch_info(db_path, batch_id)
+            if not batch_info:
+                flash(f"Cannot cancel: Batch {batch_id} not found.", "warning")
+            elif batch_info['status'] not in ['pending', 'processing']:
+                flash(f"Cannot cancel: Batch {batch_id} is already {batch_info['status']}.", "warning")
+            else:
+                # Update status to cancelling - the background thread should pick this up
+                db_manager.update_batch_status(db_path, batch_id, 'cancelling')
+                flash(f"Cancellation requested for batch {batch_id}. Status will update shortly.", "info")
+                logger.info(f"Set batch {batch_id} status to cancelling.")
+        except Exception as e:
+            logger.exception(f"Error requesting cancellation for batch {batch_id}: {e}")
+            flash(f"An unexpected error occurred while trying to cancel batch {batch_id}.", "danger")
+        
+        # Redirect back to the history page, or potentially where the user came from?
+        # History page is safest for now.
+        return redirect(url_for('batch_history'))
+    # --- End Cancel Job Route --- #
+    
     return app
 
 # Allow running directly for development

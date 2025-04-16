@@ -979,12 +979,14 @@ def run_batch_background(batch_id):
         return # Exit thread
 
     logger.info(f"BACKGROUND THREAD: Processing {total_tasks} tasks for batch {batch_id} (Mode: {batch_config.get('mode')}) using up to {config.MAX_WORKER_THREADS} threads...")
-    # Update DB status to processing (already done by prepare_batch, but can confirm)
     db_manager.update_batch_status(db_path, batch_id, 'processing') 
     
     success_count = 0
     error_count = 0
-    
+    cancelled = False # Flag to track if job was cancelled
+    processed_tasks = 0
+    tasks_to_cancel = list(tasks_to_process) # Keep track of tasks not yet processed
+
     # Create a configuration dictionary to pass to each worker
     worker_config = {
         'db_path': db_path,
@@ -1009,46 +1011,85 @@ def run_batch_background(batch_id):
         future_to_task_id = {
             executor.submit(
                 translate_row_worker, 
-                task['task_id'],              # Pass task_id
-                task['batch_id'],             # Pass batch_id
-                task['row_index_in_file'], # Pass row_index
-                task['language_code'],        # Pass lang_code
-                task['source_text'],          # Pass source_text
-                worker_config,             # Pass the worker_config dictionary
-                None                       # Pass None for progress_callback for now
+                task['task_id'], task['batch_id'], task['row_index_in_file'], 
+                task['language_code'], task['source_text'], worker_config, None
             ): task['task_id'] 
             for task in tasks_to_process
         }
         
-        for future in tqdm(concurrent.futures.as_completed(future_to_task_id), total=total_tasks, desc=f"Translating Batch {batch_id}"):
+        # Wrap the as_completed iterator with tqdm for progress
+        progress_bar = tqdm(concurrent.futures.as_completed(future_to_task_id), total=total_tasks, desc=f"Translating Batch {batch_id}")
+
+        for i, future in enumerate(progress_bar):
+            # <<< Check for cancellation periodically (e.g., every 5 tasks) >>>
+            if i % 5 == 0: 
+                current_status_info = db_manager.get_batch_info(db_path, batch_id)
+                if current_status_info and current_status_info['status'] == 'cancelling':
+                    logger.warning(f"BACKGROUND THREAD [{batch_id}]: Cancellation requested. Stopping task submission and waiting for running tasks.")
+                    cancelled = True
+                    # Cancel pending futures (tasks not yet started)
+                    # Note: This might not be perfectly reliable depending on thread state
+                    # It tells the executor not to run them if they haven't started.
+                    for f in future_to_task_id:
+                        if not f.done() and not f.running():
+                            f.cancel()
+                    break # Exit the loop submitting/waiting for tasks
+
             task_id = future_to_task_id[future]
-            logger.debug(f"BACKGROUND THREAD: Waiting for result from task {task_id}...") 
+            logger.debug(f"BACKGROUND THREAD [{batch_id}]: Waiting for result from task {task_id}...") 
             try:
                 completed_successfully, final_translation = future.result()
-                logger.debug(f"BACKGROUND THREAD: Result received for task {task_id}. Success={completed_successfully}") 
+                logger.debug(f"BACKGROUND THREAD [{batch_id}]: Result received for task {task_id}. Success={completed_successfully}") 
                 if completed_successfully:
                     success_count += 1
                 else:
                     error_count += 1 
+                processed_tasks += 1
+            except concurrent.futures.CancelledError:
+                 logger.info(f"BACKGROUND THREAD [{batch_id}]: Task {task_id} was cancelled before completion.")
+                 error_count += 1 # Count cancelled as error for status purposes?
+                 processed_tasks += 1
             except Exception as exc:
-                logger.error(f'BACKGROUND THREAD: Task {task_id} generated an exception: {exc}', exc_info=True) 
+                logger.error(f'BACKGROUND THREAD [{batch_id}]: Task {task_id} generated an exception: {exc}', exc_info=True) 
                 error_count += 1 
+                processed_tasks += 1
                 try:
                     # Use db_manager to update task status on direct exception
-                    db_manager.update_task_final_result(
+                    db_manager.update_task_results(
+                         db_path=db_path,
                          task_id=task_id, 
                          status='failed', 
-                         error_message=f'Unhandled worker exception: {exc}'
+                         error_msg=f'Unhandled worker exception: {exc}'
                     )
                 except Exception as db_exc:
-                     logger.error(f"BACKGROUND THREAD: Failed to update task {task_id} status after exception: {db_exc}")
+                     logger.error(f"BACKGROUND THREAD [{batch_id}]: Failed to update task {task_id} status after exception: {db_exc}")
 
-    logger.info(f"BACKGROUND THREAD: Task processing complete for batch {batch_id}. Success: {success_count}, Errors: {error_count}") 
-    logger.info(f"BACKGROUND THREAD: Tasks ending in error state: {error_count}")
+        # After loop finishes or is broken
+        progress_bar.close() # Close the tqdm bar
+        logger.info(f"BACKGROUND THREAD [{batch_id}]: Worker loop finished. Processed: {processed_tasks}, Cancelled flag: {cancelled}")
+
+    # Determine final status
+    if cancelled:
+        final_batch_status = 'failed' # Treat cancelled jobs as failed for simplicity
+        logger.warning(f"BACKGROUND THREAD [{batch_id}]: Job was cancelled. Setting final status to {final_batch_status}.")
+        # Optionally: Update remaining unprocessed tasks in DB to 'cancelled' or 'failed'
+        # This requires knowing which tasks *didn't* get processed.
+        # This is complex with as_completed; easier might be to fetch all non-completed tasks after loop.
+        try:
+            remaining_tasks = db_manager.get_pending_tasks(db_path, batch_id) # Get tasks still pending
+            for task in remaining_tasks:
+                 db_manager.update_task_status(db_path, task['task_id'], 'failed', 'Job cancelled')
+            logger.info(f"BACKGROUND THREAD [{batch_id}]: Marked {len(remaining_tasks)} remaining pending tasks as failed due to cancellation.")
+        except Exception as cancel_update_e:
+             logger.error(f"BACKGROUND THREAD [{batch_id}]: Error updating remaining tasks after cancellation: {cancel_update_e}")
+    elif error_count > 0:
+        final_batch_status = 'completed_with_errors'
+    else:
+        final_batch_status = 'completed'
     
-    final_batch_status = 'completed' if error_count == 0 else 'completed_with_errors' 
+    logger.info(f"BACKGROUND THREAD [{batch_id}]: Finalizing batch. Success: {success_count}, Errors/Cancelled: {error_count}, Final Status: {final_batch_status}") 
     db_manager.update_batch_status(db_path, batch_id, final_batch_status)
-    logger.info(f"BACKGROUND THREAD: Final batch status {final_batch_status} updated in DB for {batch_id}.")
+    logger.info(f"BACKGROUND THREAD [{batch_id}]: Final batch status {final_batch_status} updated in DB.")
 
 # --- Input Processing --- 
 def prepare_batch(input_file_path, original_filename, selected_languages, mode_config):

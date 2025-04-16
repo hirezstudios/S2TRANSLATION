@@ -550,7 +550,11 @@ def translate_row_worker(task_id, batch_id, row_index, lang_code, source_text, w
 
     # --- Retrieve Config --- 
     db_path = worker_config['db_path']
-    translation_mode = worker_config['translation_mode']
+    # <<< GET new flags >>>
+    use_stage0 = worker_config['use_stage0']
+    use_evaluate_refine = worker_config['use_evaluate_refine']
+    
+    # <<< Get ALL stage configs regardless of flags >>>
     stage1_api_cfg = worker_config['stage1_api']
     stage2_api_cfg = worker_config['stage2_api']
     stage3_api_cfg = worker_config['stage3_api']
@@ -558,6 +562,7 @@ def translate_row_worker(task_id, batch_id, row_index, lang_code, source_text, w
     stage2_model_override = worker_config['stage2_model']
     stage3_model_override = worker_config['stage3_model']
     s0_model = worker_config['s0_model']
+    
     batch_prompt = worker_config['batch_prompt']
     use_vs = worker_config['use_vs']
     openai_client_obj = worker_config['openai_client']
@@ -597,14 +602,6 @@ def translate_row_worker(task_id, batch_id, row_index, lang_code, source_text, w
             target_openai_vs_id = None 
     # --- End Vector Store Setup ---
             
-    audit_record_base = {
-        "task_id": task_id, 
-        "row_index": row_index + 1,
-        "language": lang_code, 
-        "mode": translation_mode,
-        "vs_used_overall": bool(target_openai_vs_id)
-    }
-
     # --- Get necessary data from DB for this specific task ---
     task_details = None
     try:
@@ -615,38 +612,42 @@ def translate_row_worker(task_id, batch_id, row_index, lang_code, source_text, w
         conn_task.close()
     except Exception as db_err:
         logger.error(f"WORKER [{task_id} / {row_identifier}]: Failed to retrieve task details from DB: {db_err}", exc_info=True)
-        # Fail the task if we can't get its details
         db_manager.update_task_results(db_path, task_id, 'failed', error_msg=f"DB Error: {db_err}")
         return False, None
 
     if not task_details:
         logger.error(f"WORKER [{task_id} / {row_identifier}]: Task details not found in DB (task_id: {task_id})")
-        # Status might already be updated by DB function, but ensure consistency
         db_manager.update_task_results(db_path, task_id, 'failed', error_msg="Task details not found")
         return False, None
 
     initial_target_text_db = task_details['initial_target_text']
-    # --- End DB Data Retrieval ---
     
-    # --- Determine if Minimal Change Mode should be applied ---
+    # --- Determine if Minimal Change Mode should be applied (MOVED) --- 
     apply_minimal_change = False
     minimal_change_context = None
     if update_strategy == 'update_existing' and initial_target_text_db and initial_target_text_db.strip():
         apply_minimal_change = True
         minimal_change_context = {
             "existing_target_text": initial_target_text_db,
-            "new_english_source": source_text # The source_text passed to worker is the new one
+            "new_english_source": source_text
         }
         logger.info(f"WORKER [{task_id} / {row_identifier}]: Applying MINIMAL CHANGE strategy.")
-        # Add strategy used to audit base
-        audit_record_base["update_strategy_applied"] = "minimal_change"
     else:
-        # Log why minimal change wasn't applied if strategy was set
         if update_strategy == 'update_existing':
              logger.info(f"WORKER [{task_id} / {row_identifier}]: Minimal change strategy selected, but no existing target text found. Using retranslate.")
-        audit_record_base["update_strategy_applied"] = "retranslate"
-    # --- End Mode Determination ---
+    # --- End Mode Determination (MOVED) ---
+            
+    audit_record_base = {
+        "task_id": task_id, 
+        "row_index": row_index + 1,
+        "language": lang_code, 
+        "use_stage0": use_stage0,
+        "use_evaluate_refine": use_evaluate_refine,
+        "update_strategy_applied": "minimal_change" if apply_minimal_change else "retranslate",
+        "vs_used_overall": bool(target_openai_vs_id)
+    }
 
+    # --- Handle Empty Source Text --- #
     if not source_text:
         logger.warning(f"WORKER [{task_id} / {row_identifier}]: Source text empty. Completing task.")
         final_status = 'completed'
@@ -662,276 +663,194 @@ def translate_row_worker(task_id, batch_id, row_index, lang_code, source_text, w
         logger.debug(f"WORKER [{task_id} / {row_identifier}]: Finished processing empty source.")
         return True, ""
         
-    # --- Main Translation Logic --- 
+    # --- Main Translation Logic (Refactored) --- 
     try:
-        
-        generated_glossary = None # Initialize glossary variable
-        stage0_raw = None         # Initialize S0 raw output
+        generated_glossary = None
+        stage0_raw = None
+        stage0_status = None
+        initial_translation_local = None
+        evaluation_score_local = None
+        evaluation_feedback_local = None
+        final_translation_local = "" # Default to empty string
+        error_message_local = None
 
-        # <<< --- STAGE 0: Glossary Generation (Only for FOUR_STAGE) --- >>>
-        if translation_mode == 'FOUR_STAGE':
+        # === Stage 0 (Optional) ===
+        if use_stage0:
             logger.info(f"WORKER [{task_id} / {row_identifier}]: Starting Stage 0 (Glossary Generation)")
             s0_api_to_use = 'OPENAI' 
-            s0_model_to_use = s0_model # From worker_config
-            
+            s0_model_to_use = s0_model
             if target_openai_vs_id: 
                 try:
                     stage0_combined_prompt = prompt_manager.get_full_prompt(
-                        prompt_type="0", 
-                        language_code=lang_code,
-                        batch_prompt=batch_prompt,
-                        minimal_change_context=None # Stage 0 ignores this
-                    ) 
-                    if not stage0_combined_prompt:
-                        raise ValueError("Could not generate Stage 0 prompt.")
-
+                        prompt_type="0", language_code=lang_code,
+                        batch_prompt=batch_prompt, minimal_change_context=None
+                    )
+                    if not stage0_combined_prompt: raise ValueError("Could not generate Stage 0 prompt.")
                     logger.debug(f"WORKER [{task_id} / {row_identifier}]: Calling API (Stage 0) - Model: {s0_model_to_use}, VS_ID: {target_openai_vs_id}")
-                    
                     stage0_raw = call_active_api(
-                        target_api=s0_api_to_use, 
-                        system_prompt=stage0_combined_prompt, 
-                        user_content=source_text, 
-                        row_identifier=f"{row_identifier}-S0", 
-                        model_override=s0_model_to_use,
-                        openai_vs_id=target_openai_vs_id,
+                        target_api=s0_api_to_use, system_prompt=stage0_combined_prompt, 
+                        user_content=source_text, row_identifier=f"{row_identifier}-S0", 
+                        model_override=s0_model_to_use, openai_vs_id=target_openai_vs_id,
                         temperature=0.2
                     )
-                    
                     if stage0_raw and not stage0_raw.startswith("ERROR:"):
                         generated_glossary = stage0_raw.strip()
                         logger.info(f"WORKER [{task_id} / {row_identifier}]: Stage 0 generated glossary (length: {len(generated_glossary)}).")
                         stage0_status = 'completed'
                     else:
-                        logger.warning(f"WORKER [{task_id} / {row_identifier}]: Stage 0 API call failed or returned empty. Storing raw output/error. Proceeding without glossary.")
+                        logger.warning(f"WORKER [{task_id} / {row_identifier}]: Stage 0 API call failed or returned empty/error: {stage0_raw}. Proceeding without glossary.")
                         generated_glossary = None 
                         stage0_status = 'failed'
-
+                        error_message_local = f"Stage 0 Error: {stage0_raw}" # Log first error
                 except Exception as s0_err:
-                    logger.error(f"WORKER [{task_id} / {row_identifier}]: Error during Stage 0: {s0_err}", exc_info=True)
+                    logger.error(f"WORKER [{task_id} / {row_identifier}]: Error during Stage 0 execution: {s0_err}", exc_info=True)
                     generated_glossary = None 
                     stage0_raw = str(s0_err)[:500] 
                     stage0_status = 'failed'
+                    if not error_message_local: error_message_local = f"Stage 0 Exception: {stage0_raw}" # Log first error
             else:
                  logger.warning(f"WORKER [{task_id} / {row_identifier}]: Skipping Stage 0: No active VS ID for {lang_code}.")
                  stage0_status = 'skipped_no_vs'
-        # <<< --- END STAGE 0 --- >>>
+            # Update DB with S0 results immediately
+            db_manager.update_task_results(db_path, task_id, 'stage0_complete', 
+                                       stage0_glossary=generated_glossary, 
+                                       stage0_raw_output=stage0_raw, 
+                                       stage0_status=stage0_status)
+            logger.debug(f"WORKER [{task_id} / {row_identifier}]: DB updated after Stage 0.")
 
-        # --- Get Stage 1 Prompt (Common for all modes, uses glossary if generated) ---
+        # === Stage 1 (Always Runs) ===
+        logger.info(f"WORKER [{task_id} / {row_identifier}]: Starting Stage 1 (Base Translation)")
         stage1_prompt = prompt_manager.get_full_prompt(
-            prompt_type="1", 
-            language_code=lang_code,
-            batch_prompt=batch_prompt,
-            generated_glossary=generated_glossary,
-            minimal_change_context=minimal_change_context if apply_minimal_change else None # <<< PASS CONTEXT >>>
+            prompt_type="1", language_code=lang_code, batch_prompt=batch_prompt,
+            generated_glossary=generated_glossary, # Use if generated
+            minimal_change_context=minimal_change_context # Use if applicable
         )
-        if not stage1_prompt:
-            raise ValueError(f"Could not generate Stage 1 prompt for {lang_code}")
+        if not stage1_prompt: raise ValueError(f"Could not generate Stage 1 prompt for {lang_code}")
 
-        logger.debug(f"WORKER [{task_id} / {row_identifier}]: Mode = {translation_mode}")
-        
-        # --- Mode-Specific Execution --- 
-        if translation_mode == "ONE_STAGE":
-            # --- ONE_STAGE Execution --- 
-            api_to_use = stage1_api_cfg
-            model_to_use = None 
-            vs_id_for_call = target_openai_vs_id if use_vs and api_to_use == "OPENAI" else None
-            if vs_id_for_call:
-                 logger.info(f"WORKER [{task_id} / {row_identifier}]: Using VS ID {vs_id_for_call} for ONE_STAGE OpenAI call.")
-            
-            audit_record = {**audit_record_base, "api": api_to_use, "model": model_to_use or "default"} 
-            # Add minimal change context info to audit if applied
-            if apply_minimal_change and minimal_change_context:
-                audit_record["existing_target_preview"] = minimal_change_context['existing_target_text'][:50] + "..." 
+        s1_api_to_use = stage1_api_cfg
+        s1_model_to_use = stage1_model_override
+        vs_id_for_s1 = target_openai_vs_id if use_vs and s1_api_to_use == "OPENAI" else None
+        logger.debug(f"WORKER [{task_id} / {row_identifier}]: Calling API (Stage 1) - API: {s1_api_to_use}, Model: {s1_model_to_use or 'default'}, VS_ID: {vs_id_for_s1}, MinimalChange: {apply_minimal_change}") 
+        initial_translation_local = call_active_api(
+            s1_api_to_use, stage1_prompt, source_text, 
+            row_identifier=f"{row_identifier}-S1", 
+            model_override=s1_model_to_use, openai_vs_id=vs_id_for_s1
+        )
+        logger.debug(f"WORKER [{task_id} / {row_identifier}]: API call returned (Stage 1).")
+        audit_record = {**audit_record_base, "stage1_api": s1_api_to_use, "stage1_model": s1_model_to_use or "default", "initial_translation": initial_translation_local} 
+        # Log minimal change context only once if applied
+        if apply_minimal_change and minimal_change_context:
+             audit_record["existing_target_preview"] = minimal_change_context['existing_target_text'][:50] + "..." 
 
-            logger.debug(f"WORKER [{task_id} / {row_identifier}]: Calling API (One Stage) - API: {api_to_use}, Model: {model_to_use or 'default'}, VS_ID: {vs_id_for_call}, MinimalChange: {apply_minimal_change}") 
-            final_translation_local = call_active_api(
-                api_to_use, 
-                stage1_prompt, 
-                source_text, 
-                row_identifier=row_identifier, 
-                model_override=model_to_use,
-                openai_vs_id=vs_id_for_call
-            )
-            logger.debug(f"WORKER [{task_id} / {row_identifier}]: API call returned (One Stage).") 
-            if final_translation_local is not None and not final_translation_local.startswith("ERROR:"):
-                final_status = 'completed'
-                approved_translation_local = final_translation_local
-                review_status_local = 'approved_original'
-                audit_record["final_translation"] = final_translation_local
-                audit_record["approved_translation"] = approved_translation_local
-                audit_record["review_status"] = review_status_local
-            else:
-                error_message_local = final_translation_local or "Stage 1 API call failed" 
-                audit_record["error"] = error_message_local
-                final_status = 'error'
-                approved_translation_local = None
-                review_status_local = 'pending_review'
-            log_audit_record(audit_record)
-            # End of ONE_STAGE logic
-
-        elif translation_mode == "THREE_STAGE" or translation_mode == "FOUR_STAGE":
-            # --- Start of THREE/FOUR Stage Logic --- 
-            # --- Stage 1 (Common for 3 & 4 Stage) --- 
-            s1_api = stage1_api_cfg
-            s1_model = stage1_model_override 
-            vs_id_for_s1 = target_openai_vs_id if use_vs and s1_api == "OPENAI" else None
-            if vs_id_for_s1:
-                logger.info(f"WORKER [{task_id} / {row_identifier}]: Using VS ID {vs_id_for_s1} for Stage 1 OpenAI call.")
-                
-            audit_record = {**audit_record_base, "stage1_api": s1_api, "stage1_model": s1_model or "default"}
-            # Add minimal change context info to audit if applied
-            if apply_minimal_change and minimal_change_context:
-                audit_record["existing_target_preview"] = minimal_change_context['existing_target_text'][:50] + "..."
-                
-            logger.debug(f"WORKER [{task_id} / {row_identifier}]: Calling API (Stage 1) - API: {s1_api}, Model: {s1_model or 'default'}, VS_ID: {vs_id_for_s1}, MinimalChange: {apply_minimal_change}") 
-            initial_translation_local = call_active_api(
-                s1_api, 
-                stage1_prompt, # Already includes glossary if generated
-                source_text, 
-                row_identifier=f"{row_identifier}-S1", 
-                model_override=s1_model,
-                openai_vs_id=vs_id_for_s1
-            )
-            logger.debug(f"WORKER [{task_id} / {row_identifier}]: API call returned (Stage 1).") 
-            audit_record["initial_translation"] = initial_translation_local
-            db_manager.update_task_results(db_path, task_id, 'stage1_complete', initial_tx=initial_translation_local)
-            logger.debug(f"WORKER [{task_id} / {row_identifier}]: DB updated after Stage 1.") 
-
-            if initial_translation_local is None or initial_translation_local.startswith("ERROR:"):
-                error_message_local = initial_translation_local or "Stage 1 failed"
-                final_translation_local = "" 
-                audit_record["error"] = error_message_local
-                log_audit_record(audit_record)
-                final_status = 'error' 
-            else:
-                # --- Stage 2 --- 
-                s2_api = stage2_api_cfg
-                s2_model = stage2_model_override
-                vs_id_for_s2 = None 
-                audit_record["stage2_api"] = s2_api
-                audit_record["stage2_model"] = s2_model or "default"
-                stage2_prompt = prompt_manager.get_full_prompt(
-                    prompt_type="2", 
-                    language_code=lang_code, 
-                    base_variables={"source_text": source_text, "initial_translation": initial_translation_local},
-                    batch_prompt=batch_prompt,
-                    generated_glossary=generated_glossary,
-                    minimal_change_context=minimal_change_context if apply_minimal_change else None # <<< PASS CONTEXT >>>
-                )
-                if not stage2_prompt:
-                     raise ValueError(f"Could not generate Stage 2 prompt for {lang_code}")
-                logger.debug(f"WORKER [{task_id} / {row_identifier}]: Calling API (Stage 2) - API: {s2_api}, Model: {s2_model or 'default'}, VS_ID: {vs_id_for_s2}, MinimalChange: {apply_minimal_change}") 
-                evaluation_result = call_active_api(
-                    s2_api, 
-                    stage2_prompt, 
-                    "Evaluate the translation provided above based on the rules.",
-                    row_identifier=f"{row_identifier}-S2", 
-                    model_override=s2_model,
-                    openai_vs_id=vs_id_for_s2
-                )
-                logger.debug(f"WORKER [{task_id} / {row_identifier}]: API call returned (Stage 2).") 
-                # Parse score/feedback
-                evaluation_score_local, evaluation_feedback_local = prompt_manager.parse_evaluation(evaluation_result)
-                audit_record["evaluation_raw"] = evaluation_result
-                audit_record["evaluation_score"] = evaluation_score_local
-                audit_record["evaluation_feedback"] = evaluation_feedback_local
-                # Update DB after S2
-                logger.debug(f"WORKER [{task_id} / {row_identifier}]: Updating DB after Stage 2.") 
-                db_manager.update_task_results(db_path, task_id, 'stage2_complete', score=evaluation_score_local, feedback=evaluation_feedback_local)
-                logger.debug(f"WORKER [{task_id} / {row_identifier}]: DB updated after Stage 2.") 
-
-                if evaluation_result is None or evaluation_result.startswith("ERROR:"):
-                    error_message_local = evaluation_result or "Stage 2 failed"
-                    final_translation_local = initial_translation_local
-                    audit_record["error"] = error_message_local
-                    log_audit_record(audit_record)
-                    final_status = 'error'
-                else:
-                    # --- Stage 3 --- 
-                    s3_api = stage3_api_cfg
-                    s3_model = stage3_model_override
-                    vs_id_for_s3 = target_openai_vs_id if use_vs and s3_api == "OPENAI" else None
-                    if vs_id_for_s3:
-                        logger.info(f"WORKER [{task_id} / {row_identifier}]: Using VS ID {vs_id_for_s3} for Stage 3 OpenAI call.")
-                        
-                    audit_record["stage3_api"] = s3_api
-                    audit_record["stage3_model"] = s3_model or "default"
-                    stage3_prompt = prompt_manager.get_full_prompt(
-                        prompt_type="3", 
-                        language_code=lang_code,
-                        base_variables={"source_text": source_text, "initial_translation": initial_translation_local},
-                        stage_variables={"feedback": evaluation_feedback_local},
-                        batch_prompt=batch_prompt,
-                        generated_glossary=generated_glossary,
-                        minimal_change_context=minimal_change_context if apply_minimal_change else None # <<< PASS CONTEXT >>>
-                    )
-                    if not stage3_prompt:
-                         raise ValueError(f"Could not generate Stage 3 prompt for {lang_code}")
-                    logger.debug(f"WORKER [{task_id} / {row_identifier}]: Calling API (Stage 3) - API: {s3_api}, Model: {s3_model or 'default'}, VS_ID: {vs_id_for_s3}, MinimalChange: {apply_minimal_change}") 
-                    final_translation_local = call_active_api(
-                        s3_api, 
-                        stage3_prompt, 
-                        "Revise the initial translation based *only* on the evaluation feedback provided.",
-                        row_identifier=f"{row_identifier}-S3", 
-                        model_override=s3_model,
-                        openai_vs_id=vs_id_for_s3
-                    )
-                    logger.debug(f"WORKER [{task_id} / {row_identifier}]: API call returned (Stage 3).") 
-                    audit_record["final_translation"] = final_translation_local
-
-                    if final_translation_local is None or final_translation_local.startswith("ERROR:"):
-                        error_message_local = final_translation_local or "Stage 3 failed"
-                        final_translation_local = initial_translation_local
-                        audit_record["error"] = error_message_local
-                        log_audit_record(audit_record)
-                        final_status = 'error'
-                    else:
-                        final_status = 'completed'
-                        approved_translation_local = final_translation_local
-                        review_status_local = 'approved_original'
-                        audit_record["approved_translation"] = approved_translation_local
-                        audit_record["review_status"] = review_status_local
-                        log_audit_record(audit_record)
-            # End of THREE/FOUR stage internal logic
+        # Check S1 result before proceeding or deciding final state
+        s1_failed = (initial_translation_local is None or initial_translation_local.startswith("ERROR:"))
+        if s1_failed:
+            if not error_message_local: error_message_local = initial_translation_local or "Stage 1 failed"
+            audit_record["error"] = error_message_local
+            final_status = 'failed' # S1 failure means overall failure
         else:
-            raise ValueError(f"Unsupported translation_mode: {translation_mode}")
-        # --- End Mode-Specific Execution ---
+            # S1 succeeded, update DB
+            db_manager.update_task_results(db_path, task_id, 'stage1_complete', initial_tx=initial_translation_local)
+            logger.debug(f"WORKER [{task_id} / {row_identifier}]: DB updated after Stage 1 success.") 
+            final_translation_local = initial_translation_local # Default final result is S1 if S2/S3 don't run or fail
+            final_status = 'completed' # Initial assumption if S1 succeeds
+
+        # === Stages 2 & 3 (Optional) ===
+        if use_evaluate_refine and not s1_failed:
+            logger.info(f"WORKER [{task_id} / {row_identifier}]: Starting Stage 2 (Evaluation)")
+            s2_api_to_use = stage2_api_cfg
+            s2_model_to_use = stage2_model_override
+            vs_id_for_s2 = None # S2 doesn't typically use VS
+            audit_record["stage2_api"] = s2_api_to_use
+            audit_record["stage2_model"] = s2_model_to_use or "default"
+            stage2_prompt = prompt_manager.get_full_prompt(
+                prompt_type="2", language_code=lang_code, batch_prompt=batch_prompt,
+                base_variables={"source_text": source_text, "initial_translation": initial_translation_local},
+                generated_glossary=generated_glossary, minimal_change_context=minimal_change_context
+            )
+            if not stage2_prompt: raise ValueError(f"Could not generate Stage 2 prompt for {lang_code}")
+            logger.debug(f"WORKER [{task_id} / {row_identifier}]: Calling API (Stage 2) - API: {s2_api_to_use}, Model: {s2_model_to_use or 'default'}") 
+            evaluation_result = call_active_api(
+                s2_api_to_use, stage2_prompt, 
+                "Evaluate the translation provided above based on the rules.",
+                row_identifier=f"{row_identifier}-S2", model_override=s2_model_to_use, openai_vs_id=vs_id_for_s2
+            )
+            logger.debug(f"WORKER [{task_id} / {row_identifier}]: API call returned (Stage 2).") 
+            evaluation_score_local, evaluation_feedback_local = prompt_manager.parse_evaluation(evaluation_result)
+            audit_record["evaluation_raw"] = evaluation_result
+            audit_record["evaluation_score"] = evaluation_score_local
+            audit_record["evaluation_feedback"] = evaluation_feedback_local
+            db_manager.update_task_results(db_path, task_id, 'stage2_complete', score=evaluation_score_local, feedback=evaluation_feedback_local)
+            logger.debug(f"WORKER [{task_id} / {row_identifier}]: DB updated after Stage 2.") 
+
+            s2_failed = (evaluation_result is None or evaluation_result.startswith("ERROR:"))
+            if not s2_failed:
+                logger.info(f"WORKER [{task_id} / {row_identifier}]: Starting Stage 3 (Refinement)")
+                s3_api_to_use = stage3_api_cfg
+                s3_model_to_use = stage3_model_override
+                vs_id_for_s3 = target_openai_vs_id if use_vs and s3_api_to_use == "OPENAI" else None
+                audit_record["stage3_api"] = s3_api_to_use
+                audit_record["stage3_model"] = s3_model_to_use or "default"
+                stage3_prompt = prompt_manager.get_full_prompt(
+                    prompt_type="3", language_code=lang_code, batch_prompt=batch_prompt,
+                    base_variables={"source_text": source_text, "initial_translation": initial_translation_local},
+                    stage_variables={"feedback": evaluation_feedback_local},
+                    generated_glossary=generated_glossary, minimal_change_context=minimal_change_context
+                )
+                if not stage3_prompt: raise ValueError(f"Could not generate Stage 3 prompt for {lang_code}")
+                logger.debug(f"WORKER [{task_id} / {row_identifier}]: Calling API (Stage 3) - API: {s3_api_to_use}, Model: {s3_model_to_use or 'default'}, VS_ID: {vs_id_for_s3}") 
+                s3_final_translation = call_active_api(
+                    s3_api_to_use, stage3_prompt, 
+                    "Revise the initial translation based *only* on the evaluation feedback provided.",
+                    row_identifier=f"{row_identifier}-S3", model_override=s3_model_to_use, openai_vs_id=vs_id_for_s3
+                )
+                logger.debug(f"WORKER [{task_id} / {row_identifier}]: API call returned (Stage 3).") 
+                audit_record["final_translation"] = s3_final_translation # Log final LLM output
+
+                s3_failed = (s3_final_translation is None or s3_final_translation.startswith("ERROR:"))
+                if not s3_failed:
+                    final_translation_local = s3_final_translation # Update final result with S3 output
+                    # final_status remains 'completed'
+                else:
+                    # S3 failed, keep S1 result as final, but log S3 error
+                    if not error_message_local: error_message_local = s3_final_translation or "Stage 3 failed"
+                    audit_record["error"] = error_message_local
+                    final_status = 'completed_with_errors' # S1 ok, S3 failed
+            else: 
+                # S2 failed, keep S1 result as final, log S2 error
+                if not error_message_local: error_message_local = evaluation_result or "Stage 2 failed"
+                audit_record["error"] = error_message_local
+                final_status = 'completed_with_errors' # S1 ok, S2 failed
+        
+        # === Determine Final Approved/Review Status ===
+        if final_status == 'completed':
+            approved_translation_local = final_translation_local
+            review_status_local = 'approved_original'
+        elif final_status == 'completed_with_errors': 
+            # If S1 worked but S2/S3 failed, should we auto-approve S1? Or leave pending?
+            # Let's leave pending review if any stage after S1 failed.
+            approved_translation_local = None # No auto-approval
+            review_status_local = 'pending_review'
+        else: # failed or error
+            approved_translation_local = None
+            review_status_local = 'pending_review'
+        
+        # Add final approved/review status to audit
+        audit_record["approved_translation"] = approved_translation_local
+        audit_record["review_status"] = review_status_local
+        log_audit_record(audit_record) # Log full audit record once at the end
 
     except Exception as e:
         logger.exception(f"WORKER [{task_id} / {row_identifier}]: Unhandled exception in worker: {e}", exc_info=True)
-        error_message_local = str(e)
+        error_message_local = str(e)[:500] # Truncate long errors
         final_status = 'failed'
-        # Ensure audit log reflects the error
-        try:
-            audit_record = {**audit_record_base, "error": error_message_local}
-            log_audit_record(audit_record)
-        except Exception as audit_e:
-             logger.error(f"WORKER [{task_id} / {row_identifier}]: Failed to log audit record after main worker exception: {audit_e}")
-        # Ensure results are nullified on major error
-        initial_translation_local = None
-        final_translation_local = ""
-        evaluation_score_local = None
-        evaluation_feedback_local = None
-        approved_translation_local = None
-        review_status_local = 'pending_review'
-        # Update DB with error status and message
-        try:
-            db_manager.update_task_results(db_path, task_id, final_status, 
-                                       initial_tx=initial_translation_local, 
-                                       score=evaluation_score_local, 
-                                       feedback=evaluation_feedback_local, 
-                                       final_tx=final_translation_local, 
-                                       approved_tx=approved_translation_local, 
-                                       review_sts=review_status_local, 
-                                       error_msg=error_message_local,
-                                       stage0_glossary=generated_glossary,
-                                       stage0_raw_output=stage0_raw,
-                                       stage0_status=stage0_status)
-        except Exception as db_e:
-             logger.error(f"WORKER [{task_id} / {row_identifier}]: CRITICAL - Failed to update DB after worker exception: {db_e}")
-        return False, None
-
-    # Final DB update outside the main try block (if no major exception occurred)
+        # Ensure results are nullified
+        initial_translation_local = None; final_translation_local = ""; evaluation_score_local = None; evaluation_feedback_local = None; approved_translation_local = None; review_status_local = 'pending_review'; generated_glossary = None; stage0_raw = None; # stage0_status might be set
+        # Log minimal audit on major failure
+        try: log_audit_record({**audit_record_base, "error": error_message_local}) 
+        except: pass
+        
+    # Final DB update outside the main try block
     try:
         logger.debug(f"WORKER [{task_id} / {row_identifier}]: Performing final DB update. Status: {final_status}")
         db_manager.update_task_results(db_path, task_id, final_status, 
@@ -958,18 +877,30 @@ def run_batch_background(batch_id):
     logger.info(f"BACKGROUND THREAD: Starting processing for batch_id: {batch_id}")
     db_path = config.DATABASE_FILE 
     
-    # Retrieve batch config from DB - needed for worker config
+    # Retrieve batch config from DB
     batch_info = db_manager.get_batch_info(db_path, batch_id)
     if not batch_info:
-        logger.error(f"BACKGROUND THREAD: Cannot process batch: Batch info not found for {batch_id}")
-        return # Exit thread
+        logger.error(f"BACKGROUND THREAD [{batch_id}]: Cannot process batch: Batch info not found")
+        return
     try:
-        batch_config = json.loads(batch_info['config_details'])
+        batch_config = json.loads(batch_info['config_details'] or '{}')
+        # <<< Add Backward Compatibility Check >>>
+        if 'use_stage0' not in batch_config or 'use_evaluate_refine' not in batch_config:
+            logger.warning(f"BACKGROUND THREAD [{batch_id}]: Old config format detected. Inferring settings from 'mode'.")
+            old_mode = batch_config.get('mode', 'ONE_STAGE') # Default to ONE_STAGE if mode is missing too
+            use_stage0_inferred = (old_mode == 'FOUR_STAGE')
+            use_evaluate_refine_inferred = (old_mode in ['THREE_STAGE', 'FOUR_STAGE'])
+            # Add inferred flags to the config we use later
+            batch_config['use_stage0'] = use_stage0_inferred
+            batch_config['use_evaluate_refine'] = use_evaluate_refine_inferred
+            logger.info(f"BACKGROUND THREAD [{batch_id}]: Inferred: use_stage0={use_stage0_inferred}, use_evaluate_refine={use_evaluate_refine_inferred} from mode='{old_mode}'")
+        # <<< End Backward Compatibility >>>
+
         batch_prompt = batch_config.get('batch_prompt', '')
     except Exception as e:
-        logger.error(f"BACKGROUND THREAD: Cannot process batch {batch_id}: Failed to parse config_details - {e}")
+        logger.error(f"BACKGROUND THREAD [{batch_id}]: Cannot process batch: Failed to parse config_details - {e}")
         db_manager.update_batch_status(db_path, batch_id, 'failed')
-        return # Exit thread
+        return
         
     tasks_to_process = db_manager.get_pending_tasks(db_path, batch_id)
     total_tasks = len(tasks_to_process)
@@ -978,7 +909,7 @@ def run_batch_background(batch_id):
         db_manager.update_batch_status(db_path, batch_id, 'completed_empty')
         return # Exit thread
 
-    logger.info(f"BACKGROUND THREAD: Processing {total_tasks} tasks for batch {batch_id} (Mode: {batch_config.get('mode')}) using up to {config.MAX_WORKER_THREADS} threads...")
+    logger.info(f"BACKGROUND THREAD [{batch_id}]: Processing {total_tasks} tasks (UseS0: {batch_config.get('use_stage0')}, UseEvalRefine: {batch_config.get('use_evaluate_refine')}) using up to {config.MAX_WORKER_THREADS} threads...")
     db_manager.update_batch_status(db_path, batch_id, 'processing') 
     
     success_count = 0
@@ -990,17 +921,18 @@ def run_batch_background(batch_id):
     # Create a configuration dictionary to pass to each worker
     worker_config = {
         'db_path': db_path,
-        'translation_mode': batch_config.get('mode', 'ONE_STAGE'),
+        'use_stage0': batch_config.get('use_stage0', False),
+        'use_evaluate_refine': batch_config.get('use_evaluate_refine', False),
         'stage1_api': batch_config.get('s1_api'),
         'stage2_api': batch_config.get('s2_api'),
         'stage3_api': batch_config.get('s3_api'),
         'stage1_model': batch_config.get('s1_model'),
         'stage2_model': batch_config.get('s2_model'),
         'stage3_model': batch_config.get('s3_model'),
-        's0_model': batch_config.get('s0_model'), # Added S0
+        's0_model': batch_config.get('s0_model'),
         'batch_prompt': batch_config.get('batch_prompt', ''),
         'use_vs': batch_config.get('use_vs', False),
-        'openai_client': api_clients.get_openai_client() or None, # Pass client instance
+        'openai_client': api_clients.get_openai_client() or None, 
         'update_strategy': batch_config.get('update_strategy', 'retranslate')
     }
     
@@ -1145,14 +1077,16 @@ def prepare_batch(input_file_path, original_filename, selected_languages, mode_c
             return None
 
         # 3. Add Batch entry to DB
-        # Add original header info to config details
-        mode_config['original_header'] = df.columns.tolist()
+        # <<< Construct the FINAL intended header >>>
+        final_header = df.columns.tolist()
+        target_cols_to_add = [f"tg_{lang}" for lang in selected_languages if f"tg_{lang}" not in final_header]
+        final_header.extend(target_cols_to_add)
+        logger.info(f"Constructed final header for saving: {final_header}")
+        mode_config['original_header'] = final_header # Add final header to config
+        
         config_details_json = json.dumps(mode_config)
-        success = db_manager.add_batch(db_path, batch_id, original_filename, config_details_json)
-        # <<< REMOVE THIS CHECK - add_batch raises exception on failure >>>
-        # if not success:
-        #     logger.error("add_batch returned False unexpectedly.")
-        #     return None
+        db_manager.add_batch(db_path, batch_id, original_filename, config_details_json)
+        # No need to check return value if add_batch raises exceptions
 
         # 4. Add Task entries to DB
         tasks_added = 0
@@ -1251,15 +1185,22 @@ def generate_export(batch_id, output_file_path):
     for task_row in tasks:
         row_index = task_row['row_index_in_file']
         lang_code = task_row['language_code']
-        # --- Use approved_translation for export --- #
-        # Fallback to final_translation if approved is missing and status is approved_original?
         approved_tx = task_row['approved_translation']
         review_status = task_row['review_status']
-        # Only include translation if it was approved (original or edited)
-        translation_to_export = ""
-        if review_status in ['approved_original', 'approved_edited']:
-             translation_to_export = approved_tx if approved_tx is not None else task_row['final_translation'] or "" # Fallback logic
-        # --- End Export Logic Change --- #
+        task_status = task_row['status'] # Get task status
+        final_tx = task_row['final_translation'] # Get LLM final
+        
+        # Determine translation to export based on review and task status
+        translation_to_export = "" # Default to empty
+        if review_status in ['approved_original', 'approved_edited'] and approved_tx is not None:
+            # Prioritize explicitly approved text
+            translation_to_export = approved_tx
+        elif task_status == 'completed' and review_status == 'pending_review' and final_tx is not None:
+            # If task completed BUT is pending review, export the LLM's final translation 
+            # This covers the S0+S1 case where auto-approval might not have set approved_translation yet
+            # or if user manually set back to pending.
+            translation_to_export = final_tx
+        # Otherwise (e.g., status=failed, review=denied, review=pending with no final_tx), leave as empty string
         
         metadata_json = task_row['metadata_json']
         try: metadata = json.loads(metadata_json or '{}')

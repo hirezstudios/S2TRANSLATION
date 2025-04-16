@@ -23,7 +23,7 @@
         <div>
             <!-- Export Buttons -->
             <a href="{{ url_for('export_batch', batch_id=batch['batch_id']) }}" class="btn btn-success me-2" role="button" target="_blank">Download Approved CSV</a>
-            {% if batch_config and batch_config.mode in ['THREE_STAGE', 'FOUR_STAGE'] %}
+            {% if show_stages_report_button %}
                 <a href="{{ url_for('export_stages_report', batch_id=batch['batch_id']) }}" class="btn btn-info" role="button" target="_blank">Download Stages Report</a>
             {% endif %}
         </div>

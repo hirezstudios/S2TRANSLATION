@@ -309,10 +309,10 @@ def get_completed_tasks_for_export(db_file_path, batch_id):
         # Or should we fetch all and let generate_export decide?
         # Let's fetch all relevant data for rows that reached completion, export will use approved.
         cursor = conn.execute("""
-            SELECT row_index_in_file, language_code, approved_translation, final_translation, review_status, metadata_json, source_text 
+            SELECT row_index_in_file, language_code, approved_translation, final_translation, review_status, status, metadata_json, source_text 
             FROM TranslationTasks 
             WHERE batch_id = ? 
-            -- Maybe filter by status LIKE 'completed%'?
+            -- Fetch all rows regardless of final status, let export decide what to include
             ORDER BY row_index_in_file ASC, language_code ASC
             """, (batch_id,))
         tasks = cursor.fetchall()

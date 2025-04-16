@@ -415,25 +415,37 @@ def create_app():
             logger.info(f"Input mode: {input_mode}, File provided: {file is not None and file.filename != ''}, Phrase provided: {bool(source_phrase)}")
 
             # --- Get Common Form Data --- #
-            selected_languages = request.form.getlist('languages') # For CSV mode, this comes from file; for phrase mode, it's from checkboxes
-            mode = request.form.get('mode', 'FOUR_STAGE') # Update default based on UI
-            one_stage_api = request.form.get('one_stage_api', config.DEFAULT_API)
-            one_stage_model = request.form.get('one_stage_model') or None
-            s1_api = request.form.get('s1_api', config.STAGE1_API)
+            selected_languages = request.form.getlist('languages') 
+            # <<< REMOVE old mode >>>
+            # mode = request.form.get('mode', 'FOUR_STAGE') 
+            # <<< GET New Checkbox Values >>>
+            use_stage0 = request.form.get('use_stage0') == 'true'
+            use_evaluate_refine = request.form.get('use_evaluate_refine') == 'true'
+            
+            # <<< GET Consolidated API/Model Config >>>
+            # S0 (Always OpenAI, get model override)
+            s0_model = request.form.get('s0_model') or config.S0_MODEL
+            # S1
+            s1_api = request.form.get('s1_api') # No default needed, should come from select
             s1_model = request.form.get('s1_model') or None
-            s2_api = request.form.get('s2_api', config.STAGE2_API)
+            # S2
+            s2_api = request.form.get('s2_api')
             s2_model = request.form.get('s2_model') or None
-            s3_api = request.form.get('s3_api', config.STAGE3_API)
+            # S3
+            s3_api = request.form.get('s3_api')
             s3_model = request.form.get('s3_model') or None
-            s0_model = request.form.get('s0_model') or config.S0_MODEL # For Four Stage
-            s1_api_four = request.form.get('s1_api_four', config.STAGE1_API)
-            s1_model_four = request.form.get('s1_model_four') or None
-            s2_api_four = request.form.get('s2_api_four', config.STAGE2_API)
-            s2_model_four = request.form.get('s2_model_four') or None
-            s3_api_four = request.form.get('s3_api_four', config.STAGE3_API)
-            s3_model_four = request.form.get('s3_model_four') or None
+            
+            # <<< REMOVE old API vars >>>
+            # one_stage_api = request.form.get('one_stage_api', config.DEFAULT_API)
+            # one_stage_model = request.form.get('one_stage_model') or None 
+            # s1_api_four = request.form.get('s1_api_four', config.STAGE1_API)
+            # s1_model_four = request.form.get('s1_model_four') or None
+            # s2_api_four = request.form.get('s2_api_four', config.STAGE2_API)
+            # s2_model_four = request.form.get('s2_model_four') or None
+            # s3_api_four = request.form.get('s3_api_four', config.STAGE3_API)
+            # s3_model_four = request.form.get('s3_model_four') or None
 
-            use_vs = True if mode == 'FOUR_STAGE' else request.form.get('use_vector_store') == 'true'
+            use_vs = request.form.get('use_vector_store') == 'true'
             batch_prompt_text = request.form.get('batch_prompt', '').strip()
             update_strategy = request.form.get('update_strategy', 'update_existing') # Update default based on UI
 
@@ -518,47 +530,47 @@ def create_app():
                     error_msg = "No file selected."
                 return jsonify({"error": error_msg}), 400
 
-            # --- Construct Mode Config (common to both modes) --- #
-            logger.info(f"Constructing mode config - Mode: {mode}, Strategy: {update_strategy}, Languages: {batch_languages}, Use VS: {use_vs}")
+            # --- Construct NEW Mode Config --- #
+            logger.info(f"Constructing mode config - UseS0: {use_stage0}, UseEvalRefine: {use_evaluate_refine}, Languages: {batch_languages}, Use VS: {use_vs}, Strategy: {update_strategy}")
             mode_config = {
-                "mode": mode,
-                "languages": batch_languages, # Use languages determined by mode
+                "use_stage0": use_stage0,
+                "use_evaluate_refine": use_evaluate_refine,
+                "languages": batch_languages,
                 "use_vs": use_vs,
                 "batch_prompt": batch_prompt_text,
                 "update_strategy": update_strategy,
-                 # Add API/Model details based on actual mode selected
-                "s0_model": s0_model if mode == "FOUR_STAGE" else None,
-                "s1_api": one_stage_api if mode == "ONE_STAGE" else (s1_api_four if mode == "FOUR_STAGE" else s1_api),
-                "s1_model": one_stage_model if mode == "ONE_STAGE" else (s1_model_four if mode == "FOUR_STAGE" else s1_model),
-                "s2_api": s2_api_four if mode == "FOUR_STAGE" else (s2_api if mode == "THREE_STAGE" else None),
-                "s2_model": s2_model_four if mode == "FOUR_STAGE" else (s2_model if mode == "THREE_STAGE" else None),
-                "s3_api": s3_api_four if mode == "FOUR_STAGE" else (s3_api if mode == "THREE_STAGE" else None),
-                "s3_model": s3_model_four if mode == "FOUR_STAGE" else (s3_model if mode == "THREE_STAGE" else None)
+                "s0_model": s0_model,
+                "s1_api": s1_api,
+                "s1_model": s1_model,
+                "s2_api": s2_api,
+                "s2_model": s2_model,
+                "s3_api": s3_api,
+                "s3_model": s3_model,
+                "input_type": input_mode
             }
-            # Add input_type to config for tracking
-            mode_config['input_type'] = input_mode
-            logger.debug(f"Final mode_config: {mode_config}")
+
+            # Add Intended Header to Config BEFORE calling prepare_batch
+            if input_mode == 'phrase':
+                 intended_header = ["Record ID", "Context", "DeveloperNotes", config.SOURCE_COLUMN] + [f"tg_{lang}" for lang in batch_languages]
+                 mode_config['original_header'] = intended_header
+                 logger.debug(f"Setting intended header for phrase mode: {intended_header}")
+            else:
+                 # For CSV mode, read the actual header
+                 try:
+                     temp_df = pd.read_csv(file_path_to_process, nrows=0)
+                     mode_config['original_header'] = temp_df.columns.tolist()
+                 except Exception as header_e:
+                     logger.warning(f"Could not read header from {file_path_to_process} to store in config: {header_e}")
+                     mode_config['original_header'] = []
+
+            logger.debug(f"Final mode_config before prepare_batch: {mode_config}")
 
             # --- Call prepare_batch --- #
-            if not file_path_to_process:
-                 logger.error("Internal error: file_path_to_process is None before calling prepare_batch.")
-                 return jsonify({"error": "Internal server error preparing job."}), 500
-
-            # <<< ADD DETAILED DEBUGGING BEFORE PREPARE BATCH >>>
-            logger.debug(f"DEBUG PRE-PREPARE - Mode: {mode}")
-            logger.debug(f"DEBUG PRE-PREPARE - Selected Languages: {batch_languages}")
-            logger.debug(f"DEBUG PRE-PREPARE - Form value one_stage_api: {request.form.get('one_stage_api')}")
-            logger.debug(f"DEBUG PRE-PREPARE - Variable one_stage_api: {one_stage_api}")
-            logger.debug(f"DEBUG PRE-PREPARE - config.DEFAULT_API: {config.DEFAULT_API}")
-            logger.debug(f"DEBUG PRE-PREPARE - config.STAGE1_API: {config.STAGE1_API}")
-            logger.debug(f"DEBUG PRE-PREPARE - Constructed mode_config: {mode_config}")
-            # <<< END DEBUGGING >>>
-
             batch_id = translation_service.prepare_batch(
                  input_file_path=file_path_to_process,
-                 original_filename=original_filename, # Pass original/generated filename
-                 selected_languages=batch_languages, # Pass determined languages
-                 mode_config=mode_config
+                 original_filename=original_filename,
+                 selected_languages=batch_languages,
+                 mode_config=mode_config # Pass the config including the correct header
             )
 
             if batch_id:
@@ -668,19 +680,33 @@ def create_app():
         logger.info(f"Received request to export stages report for batch: {batch_id}")
         db_path = config.DATABASE_FILE
         
-        # Verify batch exists and mode is appropriate
+        # Verify batch exists and if Stages 2/3 were run
         batch_info = db_manager.get_batch_info(db_path, batch_id)
         if not batch_info:
-            return jsonify({"error": "Batch not found"}), 404
+            flash(f"Batch {batch_id} not found.", "danger")
+            return redirect(url_for('batch_history')) # Redirect if batch missing
         try:
             batch_config = json.loads(batch_info['config_details'] or '{}')
-            mode = batch_config.get('mode')
-            if mode not in ['THREE_STAGE', 'FOUR_STAGE']:
-                logger.warning(f"Stages report requested for batch {batch_id} with mode {mode}, which is not supported.")
-                return jsonify({"error": "Stages report only available for THREE_STAGE or FOUR_STAGE batches"}), 400
+            logger.debug(f"Loaded batch_config for stages report check {batch_id}: {batch_config}") # <<< ADD THIS DEBUG LINE >>>
+            
+            # <<< Check new boolean flag instead of old mode >>>
+            should_have_stages = batch_config.get('use_evaluate_refine', False)
+            # Handle backward compatibility for old batches that have 'mode'
+            if 'mode' in batch_config and 'use_evaluate_refine' not in batch_config:
+                 old_mode = batch_config.get('mode')
+                 should_have_stages = (old_mode in ['THREE_STAGE', 'FOUR_STAGE'])
+                 logger.info(f"Batch {batch_id} using old config format for stages report check (mode: {old_mode}).")
+            
+            if not should_have_stages:
+                logger.warning(f"Stages report requested for batch {batch_id}, but Evaluate & Refine was not enabled.")
+                flash("Stages report only available for jobs where Evaluate & Refine was enabled.", "warning")
+                return redirect(url_for('view_results', batch_id=batch_id)) # Redirect to results page
+                # return jsonify({"error": "Stages report only available for jobs where Evaluate & Refine was enabled"}), 400
         except Exception as e:
-            logger.error(f"Error reading batch config for {batch_id} during stages export: {e}")
-            return jsonify({"error": "Failed to read batch configuration"}), 500
+            logger.error(f"Error reading batch config for {batch_id} during stages export check: {e}")
+            flash("Failed to read batch configuration to check for stages report eligibility.", "danger")
+            return redirect(url_for('batch_history'))
+            # return jsonify({"error": "Failed to read batch configuration"}), 500
 
         # Define output path
         output_dir = config.OUTPUT_DIR
@@ -716,11 +742,22 @@ def create_app():
             
             # Parse batch config for use in template
             batch_config = None
+            use_evaluate_refine = False # Default to False
             if batch_info['config_details']:
                 try: 
                     batch_config = json.loads(batch_info['config_details'])
+                    # <<< Determine if stages 2/3 were intended to run >>>
+                    use_evaluate_refine = batch_config.get('use_evaluate_refine', False)
+                    # Handle backward compatibility for old batches that have 'mode'
+                    if 'mode' in batch_config and 'use_evaluate_refine' not in batch_config:
+                         old_mode = batch_config.get('mode')
+                         use_evaluate_refine = (old_mode in ['THREE_STAGE', 'FOUR_STAGE'])
+                         logger.info(f"Results page: Batch {batch_id} using old config format for stages report check (mode: {old_mode}).")
                 except json.JSONDecodeError:
                     logger.warning(f"Could not parse config_details for batch {batch_id}")
+                    batch_config = {} # Use empty dict if parsing fails
+            else:
+                 batch_config = {} # Use empty dict if no config stored
             
             tasks_raw = db_manager.get_tasks_for_review(db_path, batch_id)
             tasks_list = []
@@ -746,7 +783,8 @@ def create_app():
             return render_template('results.html', 
                                    batch=batch_info, 
                                    tasks=tasks_list, 
-                                   batch_config=batch_config) # Pass config too
+                                   batch_config=batch_config, # Pass full config for potential other uses
+                                   show_stages_report_button=use_evaluate_refine) # Pass the flag to the template
 
         except Exception as e:
             logger.exception(f"Error fetching results for batch {batch_id}: {e}")

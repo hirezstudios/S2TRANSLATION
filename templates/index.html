@@ -59,25 +59,23 @@
 
         <div class="row mb-3">
             <div class="col-md-6">
-                <label class="form-label d-block">Translation Mode</label>
-                <div class="mb-2">
-                    <div class="form-check form-check-inline">
-                        <input class="form-check-input" type="radio" name="mode" id="mode_one" value="ONE_STAGE">
-                        <label class="form-check-label" for="mode_one">One Stage</label>
-                    </div>
-                    <div class="form-check form-check-inline">
-                        <input class="form-check-input" type="radio" name="mode" id="mode_three" value="THREE_STAGE">
-                        <label class="form-check-label" for="mode_three">Three Stage</label>
-                    </div>
-                    <!-- Add Four Stage Radio -->
-                    <div class="form-check form-check-inline">
-                        <input class="form-check-input" type="radio" name="mode" id="mode_four" value="FOUR_STAGE" checked>
-                        <label class="form-check-label" for="mode_four">Four Stage (Glossary + 3)</label>
-                    </div>
-                    <!-- End Add -->
+                {# === ADD New Workflow Option Checkboxes === #}
+                <label class="form-label d-block">Workflow Options</label>
+                <div class="form-check mb-1">
+                    <input class="form-check-input" type="checkbox" name="use_stage0" id="use_stage0" value="true" checked>
+                    <label class="form-check-label" for="use_stage0">
+                        Build Glossary (Stage 0) <span class="text-muted">(Requires OpenAI + Active Vector Store)</span>
+                    </label>
                 </div>
+                <div class="form-check mb-2">
+                    <input class="form-check-input" type="checkbox" name="use_evaluate_refine" id="use_evaluate_refine" value="true">
+                    <label class="form-check-label" for="use_evaluate_refine">
+                        Evaluate & Refine (Stages 2 & 3)
+                    </label>
+                </div>
+                {# === END New Workflow Option Checkboxes === #}
                 
-                <!-- New Update Strategy Section -->
+                {# Update Strategy Section - Remains the same #}
                 <label class="form-label d-block mt-3">Update Strategy (If Target Column Exists)</label>
                 <div class="mb-2">
                     <div class="form-check">
@@ -94,10 +92,8 @@
                         <small class="form-text text-muted d-block">Requires non-empty target columns in the input file.</small>
                     </div>
                 </div>
-                <!-- End Update Strategy Section -->
-
-                <!-- Button to toggle advanced config -->
-                <button class="btn btn-outline-secondary btn-sm" type="button" data-bs-toggle="collapse" data-bs-target="#collapseApiConfig" aria-expanded="false" aria-controls="collapseApiConfig">
+                
+                <button class="btn btn-outline-secondary btn-sm mt-2" type="button" data-bs-toggle="collapse" data-bs-target="#collapseApiConfig" aria-expanded="false" aria-controls="collapseApiConfig">
                     Advanced API/Model Settings
                 </button>
             </div>
@@ -105,75 +101,58 @@
             <!-- Collapsible API Configuration Section -->
             <div class="col-md-6 collapse" id="collapseApiConfig">
                 <label class="form-label">API Configuration Details</label>
-                <div id="api-config-one-stage" class="mt-2 p-3 border rounded bg-light" style="display: none;"> {# Initially hidden #}
-                    <h6>One Stage API</h6>
-                    <select class="form-select mb-2" name="one_stage_api" id="one_stage_api">
-                        {% for api in valid_apis %}
-                        <option value="{{ api }}" {% if api == default_apis.ONE_STAGE %}selected{% endif %}>{{ api }}</option>
-                        {% endfor %}
-                    </select>
-                    <input type="text" class="form-control form-control-sm" name="one_stage_model" placeholder="Optional Model Override (Default: {{ default_models.ONE_STAGE or 'N/A' }})">
-                </div>
-                <div id="api-config-three-stage" style="display: block;" class="mt-2 p-3 border rounded bg-light"> {# Initially shown #}
-                     <h6>Three Stage APIs</h6>
-                     <label class="form-label small">Stage 1 API:</label>
-                     <select class="form-select form-select-sm mb-1" name="s1_api" id="s1_api">
-                         {% for api in valid_apis %}
-                        <option value="{{ api }}" {% if api == default_apis.S1 %}selected{% endif %}>{{ api }}</option>
-                        {% endfor %}
-                     </select>
-                     <input type="text" class="form-control form-control-sm mb-2" name="s1_model" placeholder="S1 Model Override (Default: {{ default_models.S1 or 'N/A' }})">
-                     
-                     <label class="form-label small">Stage 2 API:</label>
-                     <select class="form-select form-select-sm mb-1" name="s2_api" id="s2_api">
-                         {% for api in valid_apis %}
-                        <option value="{{ api }}" {% if api == default_apis.S2 %}selected{% endif %}>{{ api }}</option>
-                        {% endfor %}
-                     </select>
-                     <input type="text" class="form-control form-control-sm mb-2" name="s2_model" placeholder="S2 Model Override (Default: {{ default_models.S2 or 'N/A' }})">
-
-                     <label class="form-label small">Stage 3 API:</label>
-                     <select class="form-select form-select-sm mb-1" name="s3_api" id="s3_api">
-                         {% for api in valid_apis %}
-                        <option value="{{ api }}" {% if api == default_apis.S3 %}selected{% endif %}>{{ api }}</option>
-                        {% endfor %}
-                     </select>
-                     <input type="text" class="form-control form-control-sm" name="s3_model" placeholder="S3 Model Override (Default: {{ default_models.S3 or 'N/A' }})">
-                </div>
-                <!-- Add Four Stage Config Section -->
-                <div id="api-config-four-stage" style="display: none;" class="mt-2 p-3 border rounded bg-light"> 
-                     <h6>Four Stage APIs (S0 Must be OpenAI)</h6>
-                     
-                     <label class="form-label small">Stage 0 API:</label>
-                     <select class="form-select form-select-sm mb-1" name="s0_api" id="s0_api" disabled>
+                
+                {# === ADD Consolidated Config Sections === #}
+                <!-- Stage 0 Config (Model Only, Conditionally Shown) -->
+                <div id="api-config-s0" class="mt-2 p-3 border rounded bg-light" style="display: block;"> {# Initially shown (use_stage0 default is checked) #}
+                     <h6>Stage 0: Glossary Generation</h6>
+                     <label class="form-label small">API:</label>
+                     <select class="form-select form-select-sm mb-1" name="s0_api" disabled>
                          <option value="OPENAI" selected>OPENAI</option>
                      </select>
+                     <label class="form-label small">Model:</label>
                      <input type="text" class="form-control form-control-sm mb-2" name="s0_model" placeholder="S0 Model Override (Default: {{ default_models.S0 or 'N/A' }})">
-                     
-                     <label class="form-label small">Stage 1 API:</label>
-                     <select class="form-select form-select-sm mb-1" name="s1_api_four" id="s1_api_four"> {# Use unique IDs for four stage #}
-                         {% for api in valid_apis %}
-                        <option value="{{ api }}" {% if api == default_apis.S1 %}selected{% endif %}>{{ api }}</option>
-                        {% endfor %}
-                     </select>
-                     <input type="text" class="form-control form-control-sm mb-2" name="s1_model_four" placeholder="S1 Model Override (Default: {{ default_models.S1 or 'N/A' }})">
-                     
-                     <label class="form-label small">Stage 2 API:</label>
-                     <select class="form-select form-select-sm mb-1" name="s2_api_four" id="s2_api_four">
-                         {% for api in valid_apis %}
-                        <option value="{{ api }}" {% if api == default_apis.S2 %}selected{% endif %}>{{ api }}</option>
-                        {% endfor %}
-                     </select>
-                     <input type="text" class="form-control form-control-sm mb-2" name="s2_model_four" placeholder="S2 Model Override (Default: {{ default_models.S2 or 'N/A' }})">
-
-                     <label class="form-label small">Stage 3 API:</label>
-                     <select class="form-select form-select-sm mb-1" name="s3_api_four" id="s3_api_four">
-                         {% for api in valid_apis %}
-                        <option value="{{ api }}" {% if api == default_apis.S3 %}selected{% endif %}>{{ api }}</option>
-                        {% endfor %}
-                     </select>
-                     <input type="text" class="form-control form-control-sm" name="s3_model_four" placeholder="S3 Model Override (Default: {{ default_models.S3 or 'N/A' }})">
                 </div>
+
+                <!-- Stage 1 Config (Always Shown) -->
+                <div id="api-config-s1" class="mt-2 p-3 border rounded bg-light">
+                     <h6>Stage 1: Base Translation</h6>
+                     <label class="form-label small">API:</label>
+                     <select class="form-select form-select-sm mb-1" name="s1_api" id="s1_api_select"> {# Give unique ID #}
+                         {% for api in valid_apis %}
+                         <option value="{{ api }}" {% if api == default_apis.S1 %}selected{% endif %}>{{ api }}</option>
+                         {% endfor %}
+                     </select>
+                     <label class="form-label small">Model:</label>
+                     <input type="text" class="form-control form-control-sm mb-2" name="s1_model" placeholder="S1 Model Override (Default: {{ default_models.S1 or 'N/A' }})">
+                </div>
+
+                <!-- Stage 2 Config (Conditionally Shown) -->
+                <div id="api-config-s2" class="mt-2 p-3 border rounded bg-light" style="display: none;"> {# Initially hidden (use_evaluate_refine default is unchecked) #}
+                     <h6>Stage 2: Evaluation</h6>
+                     <label class="form-label small">API:</label>
+                     <select class="form-select form-select-sm mb-1" name="s2_api">
+                         {% for api in valid_apis %}
+                         <option value="{{ api }}" {% if api == default_apis.S2 %}selected{% endif %}>{{ api }}</option>
+                         {% endfor %}
+                     </select>
+                     <label class="form-label small">Model:</label>
+                     <input type="text" class="form-control form-control-sm mb-2" name="s2_model" placeholder="S2 Model Override (Default: {{ default_models.S2 or 'N/A' }})">
+                </div>
+
+                <!-- Stage 3 Config (Conditionally Shown) -->
+                <div id="api-config-s3" class="mt-2 p-3 border rounded bg-light" style="display: none;"> {# Initially hidden (use_evaluate_refine default is unchecked) #}
+                     <h6>Stage 3: Refinement</h6>
+                     <label class="form-label small">API:</label>
+                     <select class="form-select form-select-sm mb-1" name="s3_api">
+                         {% for api in valid_apis %}
+                         <option value="{{ api }}" {% if api == default_apis.S3 %}selected{% endif %}>{{ api }}</option>
+                         {% endfor %}
+                     </select>
+                     <label class="form-label small">Model:</label>
+                     <input type="text" class="form-control form-control-sm" name="s3_model" placeholder="S3 Model Override (Default: {{ default_models.S3 or 'N/A' }})">
+                </div>
+                {# === END Consolidated Config Sections === #}
             </div>
         </div>
 
@@ -213,14 +192,27 @@
     const progressBar = document.getElementById('progress-bar');
     const exportArea = document.getElementById('export-area');
     
-    const modeOneRadio = document.getElementById('mode_one');
-    const modeThreeRadio = document.getElementById('mode_three');
-    const modeFourRadio = document.getElementById('mode_four');
-    const oneStageConfigDiv = document.getElementById('api-config-one-stage');
-    const threeStageConfigDiv = document.getElementById('api-config-three-stage');
-    const fourStageConfigDiv = document.getElementById('api-config-four-stage');
-    const oneStageApiSelect = document.getElementById('one_stage_api');
-    const stage1ApiSelect = document.getElementById('s1_api');
+    // <<< REMOVE Old Mode Radios >>>
+    // const modeOneRadio = document.getElementById('mode_one');
+    // const modeThreeRadio = document.getElementById('mode_three');
+    // const modeFourRadio = document.getElementById('mode_four');
+    // <<< REMOVE Old API Config Divs >>>
+    // const oneStageConfigDiv = document.getElementById('api-config-one-stage');
+    // const threeStageConfigDiv = document.getElementById('api-config-three-stage');
+    // const fourStageConfigDiv = document.getElementById('api-config-four-stage');
+    // <<< REMOVE Old API Select >>>
+    // const oneStageApiSelect = document.getElementById('one_stage_api');
+    
+    // <<< ADD New Workflow Checkboxes >>>
+    const useStage0Checkbox = document.getElementById('use_stage0');
+    const useEvalRefineCheckbox = document.getElementById('use_evaluate_refine');
+    // <<< ADD New API Config Divs >>>
+    const s0ConfigDiv = document.getElementById('api-config-s0');
+    const s1ConfigDiv = document.getElementById('api-config-s1');
+    const s2ConfigDiv = document.getElementById('api-config-s2');
+    const s3ConfigDiv = document.getElementById('api-config-s3');
+    const s1ApiSelect = document.getElementById('s1_api_select'); // Use new ID
+
     const useVsCheckbox = document.getElementById('use-vector-store');
     const useVsLabel = document.getElementById('use-vector-store-label');
     
@@ -339,55 +331,61 @@
 
     // Function to toggle API config display and disable/enable fields
     function toggleApiConfigVisibility() {
-        // Disable all fields first
-        oneStageConfigDiv.querySelectorAll('select, input').forEach(el => el.disabled = true);
-        threeStageConfigDiv.querySelectorAll('select, input').forEach(el => el.disabled = true);
-        fourStageConfigDiv.querySelectorAll('select, input').forEach(el => el.disabled = true);
-        // Re-enable the S0 API select specifically, as it should always be shown/disabled
-        fourStageConfigDiv.querySelector('select[name="s0_api"]').disabled = true; 
-        
-        // Hide all config sections first
-        oneStageConfigDiv.style.display = 'none';
-        threeStageConfigDiv.style.display = 'none';
-        fourStageConfigDiv.style.display = 'none';
+        // S1 is always visible and enabled
+        s1ConfigDiv.style.display = 'block';
+        s1ConfigDiv.querySelectorAll('select, input').forEach(el => el.disabled = false);
 
-        if (modeOneRadio.checked) {
-            oneStageConfigDiv.style.display = 'block';
-            oneStageConfigDiv.querySelectorAll('select, input').forEach(el => el.disabled = false);
-        } else if (modeThreeRadio.checked) {
-            threeStageConfigDiv.style.display = 'block';
-            threeStageConfigDiv.querySelectorAll('select, input').forEach(el => el.disabled = false);
-        } else if (modeFourRadio.checked) { // <<< HANDLE FOUR STAGE >>>
-            fourStageConfigDiv.style.display = 'block';
-            // Enable all four-stage inputs/selects *except* the S0 API selector
-            fourStageConfigDiv.querySelectorAll('input, select:not([name="s0_api"])').forEach(el => el.disabled = false);
+        // S0 visibility/state
+        if (useStage0Checkbox.checked) {
+            s0ConfigDiv.style.display = 'block';
+            // S0 API select is always disabled (fixed OPENAI), only enable model override input
+            s0ConfigDiv.querySelector('input[name="s0_model"]').disabled = false;
+        } else {
+            s0ConfigDiv.style.display = 'none';
+            s0ConfigDiv.querySelectorAll('input').forEach(el => el.disabled = true);
         }
-        updateVectorStoreCheckbox(); // Also update checkbox state when mode changes
+
+        // S2 & S3 visibility/state
+        if (useEvalRefineCheckbox.checked) {
+            s2ConfigDiv.style.display = 'block';
+            s3ConfigDiv.style.display = 'block';
+            s2ConfigDiv.querySelectorAll('select, input').forEach(el => el.disabled = false);
+            s3ConfigDiv.querySelectorAll('select, input').forEach(el => el.disabled = false);
+        } else {
+            s2ConfigDiv.style.display = 'none';
+            s3ConfigDiv.style.display = 'none';
+            s2ConfigDiv.querySelectorAll('select, input').forEach(el => el.disabled = true);
+            s3ConfigDiv.querySelectorAll('select, input').forEach(el => el.disabled = true);
+        }
+
+        updateVectorStoreCheckbox(); // Update VS checkbox state based on new config
     }
 
     // Function to update Vector Store checkbox state based on mode and API selection
     function updateVectorStoreCheckbox() {
         let enableCheckbox = false;
-        let forceCheck = false; // Flag to force check for Four Stage
+        let forceCheck = false;
 
-        if (modeOneRadio.checked && oneStageApiSelect.value === 'OPENAI') {
+        if (useStage0Checkbox.checked) { 
+            // S0 requires VS, so enable and force check
             enableCheckbox = true;
-        } else if (modeThreeRadio.checked && stage1ApiSelect.value === 'OPENAI') {
+            forceCheck = true;
+        } else if (s1ApiSelect.value === 'OPENAI') {
+            // If S0 isn't used, but S1 is OpenAI, just enable it
             enableCheckbox = true;
-        } else if (modeFourRadio.checked) { // <<< HANDLE FOUR STAGE >>>
-            enableCheckbox = true; // Always enabled for Four Stage
-            forceCheck = true;     // And always checked
+            forceCheck = false; // Don't force check in this case
         }
+        // If S0 is off and S1 isn't OpenAI, VS checkbox remains disabled
 
         useVsCheckbox.disabled = !enableCheckbox;
         if (enableCheckbox) {
-            useVsLabel.classList.remove('text-muted'); // Make label normal
-            useVsCheckbox.checked = forceCheck || useVsCheckbox.checked; // Check if forced, otherwise keep current state (relevant for S1/S3 enabling)
-            // Ensure it gets checked if forced
-            if (forceCheck) useVsCheckbox.checked = true;
+            useVsLabel.classList.remove('text-muted');
+            if (forceCheck) {
+                useVsCheckbox.checked = true;
+            } // If not forced, keep user's preference
         } else {
-            useVsLabel.classList.add('text-muted'); // Grey out label text
-            useVsCheckbox.checked = false; // Uncheck if disabled
+            useVsLabel.classList.add('text-muted');
+            useVsCheckbox.checked = false;
         }
     }
 
@@ -581,6 +579,13 @@
         const currentMode = hiddenInputMode.value;
         formData.set('input_mode', currentMode); // Ensure correct mode is sent
 
+        // <<< ADD New Checkbox Values >>>
+        // Convert checkbox state to boolean or handle backend appropriately
+        formData.append('use_stage0', useStage0Checkbox.checked ? 'true' : 'false'); 
+        formData.append('use_evaluate_refine', useEvalRefineCheckbox.checked ? 'true' : 'false');
+        // <<< REMOVE Old Mode >>>
+        // formData.delete('mode'); // Assuming name was 'mode'
+
         // Validation based on mode
         if (currentMode === 'csv') {
             if (!fileInput.files || fileInput.files.length === 0) {
@@ -648,14 +653,13 @@
         }
     });
     
-    // Listen for changes on ALL Mode Radio Buttons
-    modeOneRadio.addEventListener('change', toggleApiConfigVisibility);
-    modeThreeRadio.addEventListener('change', toggleApiConfigVisibility);
-    modeFourRadio.addEventListener('change', toggleApiConfigVisibility);
+    // <<< ADD New Checkbox Listeners >>>
+    useStage0Checkbox.addEventListener('change', toggleApiConfigVisibility);
+    useEvalRefineCheckbox.addEventListener('change', toggleApiConfigVisibility);
 
     // Listen for changes on relevant API Selectors
-    oneStageApiSelect.addEventListener('change', updateVectorStoreCheckbox);
-    stage1ApiSelect.addEventListener('change', updateVectorStoreCheckbox);
+    // oneStageApiSelect.addEventListener('change', updateVectorStoreCheckbox); // REMOVE old one
+    s1ApiSelect.addEventListener('change', updateVectorStoreCheckbox); // KEEP S1 listener
 
     // <<< NEW: Input Mode Change Listener >>>
     modeCsvRadio.addEventListener('change', toggleInputMode);
